@@ -1,0 +1,33 @@
+[Unit]
+Description=unfairplay-bot (Telegram bot and API for decrypted IPAs)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=unfairplay
+Group=unfairplay
+# Secrets and settings: see .env.example. Paths below are fixed by this layout.
+EnvironmentFile=/etc/unfairplay-bot/env
+# Written by update.sh: the UnfairPlay version this release was built with.
+EnvironmentFile=-/opt/unfairplay-bot/current/build.env
+Environment=HOME=/var/lib/unfairplay-bot
+Environment=UNFAIRPLAY_BOT_LISTEN=127.0.0.1:8080
+Environment=UNFAIRPLAY_BOT_DATA_DIR=/var/lib/unfairplay-bot/data
+Environment=UNFAIRPLAY_BOT_MODEL=/var/lib/unfairplay-bot/models
+Environment=UNFAIRPLAY_BOT_UNFAIRPLAY_BIN=/opt/unfairplay-bot/current/bin/unfairplay
+ExecStart=/opt/unfairplay-bot/current/bin/unfairplay-bot
+Restart=on-failure
+RestartSec=5
+# Queued and running tasks drain on SIGTERM (UNFAIRPLAY_BOT_DRAIN_TIMEOUT).
+TimeoutStopSec=35min
+KillMode=mixed
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/unfairplay-bot
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

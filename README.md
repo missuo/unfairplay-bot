@@ -170,6 +170,30 @@ to do: `/login` for a session problem, or wait for the automatic ipatool
 update for an API change) and one when it recovers. `/status` and
 `GET /v1/status` show the current state.
 
+## Deploy (systemd, no Docker)
+
+For hosts where Docker is unwanted (for example a router whose iptables
+rules must not change), `deploy/systemd/` builds and runs the service
+natively. It needs Go (the version in `go.mod` or newer), gcc, git, and
+Caddy.
+
+```sh
+useradd --system --home-dir /var/lib/unfairplay-bot --shell /usr/sbin/nologin unfairplay
+install -d -o unfairplay -g unfairplay -m 700 /var/lib/unfairplay-bot/{,data,models,canary}
+install -m 600 your-model.bin /var/lib/unfairplay-bot/models/ && chown unfairplay: /var/lib/unfairplay-bot/models/*
+install -d -m 700 /etc/unfairplay-bot     # put the settings from .env.example in /etc/unfairplay-bot/env (0600)
+git clone https://github.com/missuo/unfairplay-bot /opt/unfairplay-bot/src
+cp /opt/unfairplay-bot/src/deploy/systemd/*.service /opt/unfairplay-bot/src/deploy/systemd/*.timer /etc/systemd/system/
+systemctl daemon-reload && systemctl enable unfairplay-bot unfairplay-bot-update.timer
+/opt/unfairplay-bot/src/deploy/systemd/update.sh   # first build and start
+systemctl start unfairplay-bot-update.timer
+```
+
+`update.sh` runs hourly: it builds the newest `main` (which includes the
+CI's dependency bumps), runs the tests, then the same two canaries as the
+Docker updater before switching the `current` symlink and restarting while
+idle. Serve it with `deploy/systemd/Caddyfile`.
+
 ## Automatic dependency updates
 
 `deps.env` sets how each dependency is tracked: `main`, `release`, or

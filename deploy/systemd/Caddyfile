@@ -1,0 +1,8 @@
+# Replace the domain. Both schemes are served without a redirect so this also
+# works behind a CDN that connects to the origin over plain HTTP.
+http://ipa.example.com, https://ipa.example.com {
+	reverse_proxy 127.0.0.1:8080 {
+		# Stream Server-Sent Events and large downloads without buffering.
+		flush_interval -1
+	}
+}

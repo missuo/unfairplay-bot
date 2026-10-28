@@ -1,0 +1,8 @@
+[Unit]
+Description=Build and roll out the newest unfairplay-bot after canary checks
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/unfairplay-bot/src/deploy/systemd/update.sh
