@@ -125,8 +125,8 @@ func TestBotStrangerRequestsAccessAndAdminApproves(t *testing.T) {
 	ctx := context.Background()
 
 	b.Handle(ctx, message(strangerID, "414478124"))
-	fm.waitFor(t, strangerID, "还没有使用权限")
-	req := fm.waitFor(t, adminID, "访问申请")
+	fm.waitFor(t, strangerID, "don't have access yet")
+	req := fm.waitFor(t, adminID, "Access request")
 	if !strings.Contains(req.text, "3000") {
 		t.Fatalf("access request lacks the user ID: %s", req.text)
 	}
@@ -134,7 +134,7 @@ func TestBotStrangerRequestsAccessAndAdminApproves(t *testing.T) {
 	b.Handle(ctx, message(strangerID, "again"))
 	count := 0
 	for _, m := range fm.msgs {
-		if m.chat == adminID && strings.Contains(m.text, "访问申请") {
+		if m.chat == adminID && strings.Contains(m.text, "Access request") {
 			count++
 		}
 	}
@@ -151,7 +151,7 @@ func TestBotStrangerRequestsAccessAndAdminApproves(t *testing.T) {
 	if !b.authorized(strangerID) {
 		t.Fatal("stranger should be allowed after approval")
 	}
-	fm.waitFor(t, strangerID, "已为你开通")
+	fm.waitFor(t, strangerID, "gave you access")
 
 	b.Handle(ctx, message(adminID, "/revoke 3000"))
 	if b.authorized(strangerID) {
@@ -174,7 +174,7 @@ func TestBotPreviewConfirmProgressAndAdminNotices(t *testing.T) {
 
 	// Preview first: nothing is queued until the user confirms.
 	b.Handle(ctx, message(friendID, "https://apps.apple.com/us/app/example/id12345"))
-	preview := fm.waitFor(t, friendID, "是这个 App 吗")
+	preview := fm.waitFor(t, friendID, "Is this the right app")
 	if !strings.Contains(preview.text, "8.0.80") || !strings.Contains(preview.text, "12345") {
 		t.Fatalf("preview: %s", preview.text)
 	}
@@ -188,18 +188,18 @@ func TestBotPreviewConfirmProgressAndAdminNotices(t *testing.T) {
 	}
 
 	go b.Handle(ctx, click(friendID, preview, buttonData(preview, callbackOK)))
-	fm.waitFor(t, adminID, "通知 · 新请求")
+	fm.waitFor(t, adminID, "Notice · New request")
 	<-p.started
-	progress := fm.waitFor(t, friendID, "下载中")
+	progress := fm.waitFor(t, friendID, "Downloading")
 	if buttonData(progress, callbackCancel) == "" {
 		t.Fatal("progress message has no cancel button")
 	}
 	close(p.gate("12345:80"))
-	ready := fm.waitFor(t, friendID, "已就绪")
+	ready := fm.waitFor(t, friendID, "is ready")
 	if len(ready.kb) == 0 || !strings.HasPrefix(ready.kb[0][0].URL, "https://ipa.example.com/d/") {
 		t.Fatalf("ready message lacks download button: %+v", ready.kb)
 	}
-	done := fm.waitFor(t, adminID, "通知 · 任务完成")
+	done := fm.waitFor(t, adminID, "Notice · Task finished")
 	if !strings.Contains(done.text, "u2000") {
 		t.Fatalf("notice does not name the user: %s", done.text)
 	}
@@ -211,7 +211,7 @@ func TestBotPreviewConfirmProgressAndAdminNotices(t *testing.T) {
 	for again == nil {
 		fm.mu.Lock()
 		for id := fm.nextID; id > preview.id; id-- {
-			if m := fm.msgs[id]; m.chat == friendID && strings.Contains(m.text, "已有缓存") {
+			if m := fm.msgs[id]; m.chat == friendID && strings.Contains(m.text, "is cached") {
 				c := *m
 				again = &c
 				break
@@ -227,19 +227,19 @@ func TestBotPreviewConfirmProgressAndAdminNotices(t *testing.T) {
 		}
 	}
 	b.Handle(ctx, click(friendID, again, buttonData(again, callbackOK)))
-	fm.waitFor(t, adminID, "命中缓存")
+	fm.waitFor(t, adminID, "Cache hit")
 }
 
 func TestBotAdminOwnRequestsSendNoNotices(t *testing.T) {
 	b, fm, p := newTestBot(t)
 	ctx := context.Background()
 	b.Handle(ctx, message(adminID, "12345"))
-	preview := fm.waitFor(t, adminID, "是这个 App 吗")
+	preview := fm.waitFor(t, adminID, "Is this the right app")
 	go b.Handle(ctx, click(adminID, preview, buttonData(preview, callbackOK)))
 	<-p.started
 	close(p.gate("12345:80"))
-	fm.waitFor(t, adminID, "已就绪")
-	if fm.find(adminID, "通知") != nil {
+	fm.waitFor(t, adminID, "is ready")
+	if fm.find(adminID, "Notice") != nil {
 		t.Fatal("admin was notified about their own request")
 	}
 }
@@ -250,10 +250,10 @@ func TestBotCancelOnlyOwnTask(t *testing.T) {
 	b.allow.Allow(AllowedUser{ID: friendID})
 	b.allow.Allow(AllowedUser{ID: strangerID})
 	b.Handle(ctx, message(friendID, "12345"))
-	preview := fm.waitFor(t, friendID, "是这个 App 吗")
+	preview := fm.waitFor(t, friendID, "Is this the right app")
 	go b.Handle(ctx, click(friendID, preview, buttonData(preview, callbackOK)))
 	<-p.started
-	progress := fm.waitFor(t, friendID, "下载中")
+	progress := fm.waitFor(t, friendID, "Downloading")
 	data := buttonData(progress, callbackCancel)
 
 	b.Handle(ctx, click(strangerID, progress, data))
@@ -261,18 +261,18 @@ func TestBotCancelOnlyOwnTask(t *testing.T) {
 		t.Fatal("another user canceled the task")
 	}
 	b.Handle(ctx, click(friendID, progress, data))
-	fm.waitFor(t, friendID, "任务已取消")
-	fm.waitFor(t, adminID, "通知 · 任务取消")
+	fm.waitFor(t, friendID, "Task canceled")
+	fm.waitFor(t, adminID, "Notice · Task canceled")
 }
 
 func TestBotPreviewExpires(t *testing.T) {
 	b, fm, _ := newTestBot(t)
 	ctx := context.Background()
 	b.Handle(ctx, message(adminID, "12345"))
-	preview := fm.waitFor(t, adminID, "是这个 App 吗")
+	preview := fm.waitFor(t, adminID, "Is this the right app")
 	b.now = func() time.Time { return time.Now().Add(previewTTL + time.Minute) }
 	b.Handle(ctx, click(adminID, preview, buttonData(preview, callbackOK)))
-	fm.waitFor(t, adminID, "已过期")
+	fm.waitFor(t, adminID, "expired")
 	if s := b.svc.manager.Status(); s.Running+s.Queued != 0 {
 		t.Fatal("expired preview created a task")
 	}
@@ -313,7 +313,7 @@ func TestRenderingEscapesHTML(t *testing.T) {
 	if got := formatBytes(734003200); got != "700.0 MB" {
 		t.Errorf("formatBytes = %s", got)
 	}
-	if got := formatDuration(76 * time.Second); got != "1分16秒" {
+	if got := formatDuration(76 * time.Second); got != "1m 16s" {
 		t.Errorf("formatDuration = %s", got)
 	}
 }
@@ -346,15 +346,15 @@ func TestBotLoginIsAdminOnly(t *testing.T) {
 	b.allow.Allow(AllowedUser{ID: friendID})
 
 	b.Handle(ctx, message(friendID, "/login"))
-	fm.waitFor(t, friendID, "只有管理员")
+	fm.waitFor(t, friendID, "Only admins")
 	b.Handle(ctx, message(strangerID, "/login"))
-	fm.waitFor(t, strangerID, "还没有使用权限")
+	fm.waitFor(t, strangerID, "don't have access yet")
 	if auth.starts != 0 {
 		t.Fatal("non-admin started a login")
 	}
 
 	b.Handle(ctx, message(adminID, "/login"))
-	fm.waitFor(t, adminID, "已重新登录")
+	fm.waitFor(t, adminID, "Signed in as")
 	if auth.starts != 1 {
 		t.Fatalf("starts = %d", auth.starts)
 	}
@@ -368,17 +368,17 @@ func TestBotLoginTwoFactorCodeOnlyFromInitiatingAdmin(t *testing.T) {
 	b.allow.Allow(AllowedUser{ID: friendID})
 
 	b.Handle(ctx, message(adminID, "/login"))
-	fm.waitFor(t, adminID, "回复 6 位数字")
+	fm.waitFor(t, adminID, "6-digit code")
 
 	// An allowed non-admin sending six digits gets an app lookup, not a login.
 	b.Handle(ctx, message(friendID, "123456"))
-	fm.waitFor(t, friendID, "是这个 App 吗")
+	fm.waitFor(t, friendID, "Is this the right app")
 	if len(auth.codes) != 0 {
 		t.Fatal("non-admin message was used as a 2FA code")
 	}
 
 	b.Handle(ctx, message(adminID, "654 321"))
-	fm.waitFor(t, adminID, "已重新登录")
+	fm.waitFor(t, adminID, "Signed in as")
 	if len(auth.codes) != 1 || auth.codes[0] != "654321" {
 		t.Fatalf("codes = %v", auth.codes)
 	}
@@ -395,10 +395,10 @@ func TestBotLoginCodeExpires(t *testing.T) {
 	auth.needsCode = true
 	ctx := context.Background()
 	b.Handle(ctx, message(adminID, "/login"))
-	fm.waitFor(t, adminID, "回复 6 位数字")
+	fm.waitFor(t, adminID, "6-digit code")
 	b.now = func() time.Time { return time.Now().Add(loginCodeTTL + time.Minute) }
 	b.Handle(ctx, message(adminID, "/login 123456"))
-	fm.waitFor(t, adminID, "没有等待中的登录")
+	fm.waitFor(t, adminID, "No sign-in is waiting")
 	if len(auth.codes) != 0 {
 		t.Fatal("expired code accepted")
 	}
@@ -413,14 +413,14 @@ func TestHealthNotifiesOnlyOnChange(t *testing.T) {
 	ctx := context.Background()
 
 	h.CheckNow(ctx)
-	n := fm.waitFor(t, adminID, "下载链路异常")
+	n := fm.waitFor(t, adminID, "App Store connection failing")
 	if !strings.Contains(n.text, "/login") {
 		t.Fatalf("auth failure notice lacks the /login hint: %s", n.text)
 	}
 	h.CheckNow(ctx)
 	count := 0
 	for _, m := range fm.msgs {
-		if strings.Contains(m.text, "下载链路异常") {
+		if strings.Contains(m.text, "App Store connection failing") {
 			count++
 		}
 	}
@@ -433,5 +433,5 @@ func TestHealthNotifiesOnlyOnChange(t *testing.T) {
 	if st := h.CheckNow(ctx); !st.OK {
 		t.Fatal("expected healthy")
 	}
-	fm.waitFor(t, adminID, "下载链路已恢复")
+	fm.waitFor(t, adminID, "App Store connection restored")
 }

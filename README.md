@@ -51,13 +51,13 @@ private chats.
   admins can cancel any.
 - **Allowlist.** Admins always have access. Anyone else gets their Telegram
   ID and a "no access" reply, and admins receive an access request with
-  **✅ 允许** / **🚫 忽略** buttons (at most once per 6 h per person). Admin
+  **✅ Allow** / **🚫 Ignore** buttons (at most once per 6 h per person). Admin
   commands: `/allow <id> [note]`, `/revoke <id>`, `/users` (with one-tap
   removal), and `/status` (Apple Account, queue, cache, versions, active
   tasks). The allowlist is stored in `data/telegram-allowlist.json`.
 - **Admin notices.** Every request by a non-admin (new task, joined an
   in-progress task, or cache hit) and every completion, failure, or
-  cancellation is sent to the admins. Notices use a `🔔 通知 · …` header and a
+  cancellation is sent to the admins. Notices use a `🔔 Notice · …` header and a
   quoted block, so they look different from replies to the admin's own
   requests. The admin's own requests produce no notices. If the Apple session
   stops working, see "App Store health" below.
