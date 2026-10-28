@@ -95,12 +95,14 @@ type Manager struct {
 	cache     *Cache
 	wg        sync.WaitGroup
 	now       func() time.Time
+	onFailure func(*TaskError)
 }
 
 type ManagerOptions struct {
 	Concurrency, DecryptConcurrency, MaxQueue int
 	Timeout, Retention                        time.Duration
 	WorkDir                                   string
+	OnFailure                                 func(*TaskError)
 }
 
 func NewManager(o ManagerOptions, p Pipeline, c *Cache) (*Manager, error) {
@@ -114,7 +116,7 @@ func NewManager(o ManagerOptions, p Pipeline, c *Cache) (*Manager, error) {
 	m := &Manager{
 		tasks: map[string]*task{}, active: map[string]*task{},
 		workers: o.Concurrency, maxQueue: o.MaxQueue, retention: o.Retention, timeout: o.Timeout, workDir: o.WorkDir,
-		decrypt: make(chan struct{}, o.DecryptConcurrency), pipeline: p, cache: c, now: time.Now,
+		decrypt: make(chan struct{}, o.DecryptConcurrency), pipeline: p, cache: c, now: time.Now, onFailure: o.OnFailure,
 	}
 	m.cond = sync.NewCond(&m.mu)
 	for range o.Concurrency {
@@ -275,6 +277,9 @@ func (m *Manager) worker() {
 			}
 			slog.Warn("task failed", "id", t.view.ID, "key", t.view.App.Key, "code", te.Code, "err", te.Message)
 			m.finishLocked(t, stage, te)
+			if m.onFailure != nil {
+				go m.onFailure(te)
+			}
 		} else {
 			t.view.ArtifactID = artifact.ID
 			slog.Info("task ready", "id", t.view.ID, "key", artifact.Key, "version", artifact.Version, "size", artifact.Size)

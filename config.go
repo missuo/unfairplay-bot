@@ -32,6 +32,10 @@ type Config struct {
 	TelegramToken      string
 	TelegramAPIURL     string
 	TelegramAdmins     []int64
+	AppleID            Credentials
+	MaxAutoLogins      int
+	HealthAppID        int64
+	HealthInterval     time.Duration
 }
 
 func LoadConfig() (Config, error) {
@@ -46,6 +50,7 @@ func LoadConfig() (Config, error) {
 		IpatoolStateDir:    os.Getenv("UNFAIRPLAY_BOT_IPATOOL_STATE_DIR"),
 		KeychainPassphrase: os.Getenv("UNFAIRPLAY_BOT_KEYCHAIN_PASSPHRASE"),
 		StoreCountry:       strings.ToLower(env("UNFAIRPLAY_BOT_STORE_COUNTRY", "us")),
+		AppleID:            Credentials{Email: os.Getenv("UNFAIRPLAY_BOT_APPLE_ID_EMAIL"), Password: os.Getenv("UNFAIRPLAY_BOT_APPLE_ID_PASSWORD")},
 		TelegramToken:      os.Getenv("UNFAIRPLAY_BOT_TELEGRAM_TOKEN"),
 		TelegramAPIURL:     env("UNFAIRPLAY_BOT_TELEGRAM_API_URL", "https://api.telegram.org"),
 	}
@@ -64,6 +69,9 @@ func LoadConfig() (Config, error) {
 	parse("UNFAIRPLAY_BOT_TASK_TIMEOUT", "60m", func(v string) (err error) { c.TaskTimeout, err = time.ParseDuration(v); return })
 	parse("UNFAIRPLAY_BOT_TASK_RETENTION", "1h", func(v string) (err error) { c.TaskRetention, err = time.ParseDuration(v); return })
 	parse("UNFAIRPLAY_BOT_DRAIN_TIMEOUT", "30m", func(v string) (err error) { c.DrainTimeout, err = time.ParseDuration(v); return })
+	parse("UNFAIRPLAY_BOT_AUTO_LOGIN_MAX_ATTEMPTS", "3", func(v string) (err error) { c.MaxAutoLogins, err = strconv.Atoi(v); return })
+	parse("UNFAIRPLAY_BOT_HEALTH_APP_ID", "0", func(v string) (err error) { c.HealthAppID, err = strconv.ParseInt(v, 10, 64); return })
+	parse("UNFAIRPLAY_BOT_HEALTH_INTERVAL", "30m", func(v string) (err error) { c.HealthInterval, err = time.ParseDuration(v); return })
 
 	for _, field := range strings.FieldsFunc(os.Getenv("UNFAIRPLAY_BOT_TELEGRAM_ADMIN_IDS"), func(r rune) bool { return r == ',' || r == ' ' }) {
 		id, err := strconv.ParseInt(field, 10, 64)
@@ -75,6 +83,9 @@ func LoadConfig() (Config, error) {
 	}
 	if c.TelegramToken != "" && len(c.TelegramAdmins) == 0 {
 		errs = append(errs, errors.New("UNFAIRPLAY_BOT_TELEGRAM_ADMIN_IDS is required when the Telegram bot is enabled"))
+	}
+	if (c.AppleID.Email == "") != (c.AppleID.Password == "") {
+		errs = append(errs, errors.New("set both UNFAIRPLAY_BOT_APPLE_ID_EMAIL and UNFAIRPLAY_BOT_APPLE_ID_PASSWORD, or neither"))
 	}
 	if c.PublicURL == "" {
 		errs = append(errs, errors.New("UNFAIRPLAY_BOT_PUBLIC_URL is required"))
@@ -94,7 +105,7 @@ func LoadConfig() (Config, error) {
 	if c.Concurrency < 1 || c.DecryptConcurrency < 1 || c.DecryptConcurrency > c.Concurrency {
 		errs = append(errs, errors.New("need 1 <= UNFAIRPLAY_BOT_DECRYPT_CONCURRENCY <= UNFAIRPLAY_BOT_CONCURRENCY"))
 	}
-	if c.MaxQueue < 0 || c.CacheTTL <= 0 || c.TaskTimeout <= 0 || c.TaskRetention <= 0 || c.DrainTimeout <= 0 {
+	if c.MaxQueue < 0 || c.CacheTTL <= 0 || c.TaskTimeout <= 0 || c.TaskRetention <= 0 || c.DrainTimeout <= 0 || c.HealthInterval <= 0 || c.HealthAppID < 0 || c.MaxAutoLogins < 1 {
 		errs = append(errs, errors.New("queue, TTL, timeout, and retention values must be positive"))
 	}
 	return c, errors.Join(errs...)

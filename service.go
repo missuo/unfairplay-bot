@@ -16,6 +16,7 @@ type Service struct {
 	manager  *Manager
 	cache    *Cache
 	signer   Signer
+	health   *Health
 }
 
 type ArtifactView struct {
@@ -44,7 +45,22 @@ type Outcome struct {
 func (s *Service) Resolve(ctx context.Context, bundleID string, appID int64) (AppInfo, error) {
 	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
-	return s.resolver.Resolve(ctx, bundleID, appID)
+	info, err := s.resolver.Resolve(ctx, bundleID, appID)
+	if err != nil {
+		s.StoreFailed(classify(err))
+	}
+	return info, err
+}
+
+// StoreFailed re-checks App Store health right away after a failure that
+// may mean a lost session or a changed API.
+func (s *Service) StoreFailed(e *TaskError) {
+	switch e.Code {
+	case "auth_required", "store_error", "unavailable", "timeout":
+		if s.health != nil {
+			s.health.Trigger()
+		}
+	}
 }
 
 // IsCached reports whether the build is cached, without counting a hit.

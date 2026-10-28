@@ -27,7 +27,14 @@ const (
 	callbackIgnore    = "ig:"
 	callbackRevoke    = "rv:"
 	noticeHeaderEmoji = "🔔"
+	loginCodeTTL      = 10 * time.Minute
 )
+
+// Authenticator signs the App Store account in again (admin-only /login).
+type Authenticator interface {
+	StartLogin() (email string, needsCode bool, err error)
+	FinishLogin(code string) (email string, err error)
+}
 
 type pendingRequest struct {
 	user    tgUser
@@ -39,23 +46,25 @@ type pendingRequest struct {
 // Bot is the Telegram front end. Users talk to it in private chats; admins
 // additionally receive notices about everyone else's activity.
 type Bot struct {
-	api           Messenger
-	svc           *Service
-	admins        map[int64]bool
-	allow         *Allowlist
-	statusFn      func() string
-	now           func() time.Time
-	mu            sync.Mutex
-	pending       map[string]*pendingRequest
-	watchers      map[string]map[int64]bool // task ID -> users following it
-	requested     map[int64]time.Time       // last access request per stranger
-	lastAuthAlert time.Time
+	api       Messenger
+	svc       *Service
+	admins    map[int64]bool
+	allow     *Allowlist
+	statusFn  func() string
+	now       func() time.Time
+	mu        sync.Mutex
+	pending   map[string]*pendingRequest
+	watchers  map[string]map[int64]bool // task ID -> users following it
+	requested map[int64]time.Time       // last access request per stranger
+	auth      Authenticator
+	loginWait map[int64]time.Time // admin -> when Apple sent a 2FA code
 }
 
-func NewBot(api Messenger, svc *Service, admins []int64, allow *Allowlist, statusFn func() string) *Bot {
+func NewBot(api Messenger, svc *Service, admins []int64, allow *Allowlist, auth Authenticator, statusFn func() string) *Bot {
 	b := &Bot{
-		api: api, svc: svc, admins: map[int64]bool{}, allow: allow, statusFn: statusFn, now: time.Now,
+		api: api, svc: svc, admins: map[int64]bool{}, allow: allow, auth: auth, statusFn: statusFn, now: time.Now,
 		pending: map[string]*pendingRequest{}, watchers: map[string]map[int64]bool{}, requested: map[int64]time.Time{},
+		loginWait: map[int64]time.Time{},
 	}
 	for _, id := range admins {
 		b.admins[id] = true
@@ -73,6 +82,7 @@ var adminCommands = append(append([]botCommand{}, userCommands...),
 	botCommand{Command: "users", Description: "白名单用户"},
 	botCommand{Command: "allow", Description: "添加白名单：/allow <ID> [备注]"},
 	botCommand{Command: "revoke", Description: "移除白名单：/revoke <ID>"},
+	botCommand{Command: "login", Description: "重新登录 Apple 账号"},
 )
 
 // Run long-polls Telegram until ctx is canceled.
@@ -156,6 +166,11 @@ func (b *Bot) handleMessage(ctx context.Context, m *tgMessage) {
 	b.allow.Refresh(user.ID, user.DisplayName(), user.Username)
 
 	text := strings.TrimSpace(m.Text)
+	// A 6-digit reply is a 2FA code only from the admin who started /login.
+	if code, ok := parseAuthCode(text); ok && b.admins[user.ID] && b.takeLoginWait(user.ID) {
+		b.finishLogin(ctx, m.Chat.ID, code)
+		return
+	}
 	if cmd, args, ok := parseCommand(text); ok {
 		b.handleCommand(ctx, m, cmd, args)
 		return
@@ -204,6 +219,16 @@ func (b *Bot) handleCommand(ctx context.Context, m *tgMessage, cmd, args string)
 		}
 		note := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(args), fields[0]))
 		b.allowUser(ctx, m.Chat.ID, m.From.ID, AllowedUser{ID: id, Note: note})
+	case cmd == "login":
+		if code, ok := parseAuthCode(args); ok {
+			if b.takeLoginWait(m.From.ID) {
+				b.finishLogin(ctx, m.Chat.ID, code)
+			} else {
+				b.send(ctx, m.Chat.ID, "没有等待中的登录，请先发送 /login。", nil)
+			}
+			return
+		}
+		b.startLogin(ctx, m.Chat.ID, m.From.ID)
 	case cmd == "revoke":
 		id, err := strconv.ParseInt(strings.TrimSpace(args), 10, 64)
 		if err != nil {
@@ -272,9 +297,6 @@ func (b *Bot) preview(ctx context.Context, chatID int64, user tgUser, bundleID s
 	if err != nil {
 		te := classify(err)
 		b.edit(ctx, chatID, msgID, "❌ 查询失败："+friendlyError(te), nil)
-		if te.Code == "auth_required" {
-			b.alertAuth(ctx, te)
-		}
 		return
 	}
 	pid := shortID()
@@ -453,9 +475,6 @@ func (b *Bot) follow(ctx context.Context, chatID int64, msgID int, user tgUser, 
 }
 
 func (b *Bot) finished(ctx context.Context, user tgUser, info AppInfo, v TaskView) {
-	if v.Error != nil && v.Error.Code == "auth_required" {
-		b.alertAuth(ctx, v.Error)
-	}
 	if b.admins[user.ID] {
 		return
 	}
@@ -478,19 +497,89 @@ func (b *Bot) finished(ctx context.Context, user tgUser, info AppInfo, v TaskVie
 	}
 }
 
-// alertAuth tells admins the ipatool session needs attention, at most once
-// per hour.
-func (b *Bot) alertAuth(ctx context.Context, te *TaskError) {
+// ---- App Store session (admin only) ----
+
+func (b *Bot) takeLoginWait(adminID int64) bool {
 	b.mu.Lock()
-	if !b.lastAuthAlert.IsZero() && b.now().Sub(b.lastAuthAlert) < time.Hour {
-		b.mu.Unlock()
+	defer b.mu.Unlock()
+	at, ok := b.loginWait[adminID]
+	delete(b.loginWait, adminID)
+	return ok && b.now().Sub(at) < loginCodeTTL
+}
+
+func (b *Bot) startLogin(ctx context.Context, chatID, adminID int64) {
+	if !b.admins[adminID] { // also enforced by handleCommand
 		return
 	}
-	b.lastAuthAlert = b.now()
-	b.mu.Unlock()
-	b.notifyAdmins(ctx, 0, notice("Apple 账号需要重新登录",
-		html.EscapeString(truncate(te.Message, 300)),
-		"在服务器上执行：\n<code>docker compose exec -it bot ipatool auth login --email …</code>"), nil)
+	msgID := b.send(ctx, chatID, "🔐 正在重新登录 Apple 账号…", nil)
+	email, needsCode, err := b.auth.StartLogin()
+	switch {
+	case err != nil:
+		b.edit(ctx, chatID, msgID, "❌ 登录失败："+friendlyLoginError(err), nil)
+	case needsCode:
+		b.mu.Lock()
+		b.loginWait[adminID] = b.now()
+		b.mu.Unlock()
+		b.edit(ctx, chatID, msgID, fmt.Sprintf("📲 Apple 已向 <b>%s</b> 的受信任设备发送验证码。\n\n请在 10 分钟内直接回复 6 位数字验证码。", html.EscapeString(email)), nil)
+	default:
+		b.edit(ctx, chatID, msgID, fmt.Sprintf("✅ 已重新登录 <b>%s</b>，正在复查下载链路…", html.EscapeString(email)), nil)
+		b.recheck(ctx, chatID)
+	}
+}
+
+func (b *Bot) finishLogin(ctx context.Context, chatID int64, code string) {
+	msgID := b.send(ctx, chatID, "🔐 正在验证…", nil)
+	email, err := b.auth.FinishLogin(code)
+	if err != nil {
+		b.edit(ctx, chatID, msgID, "❌ 登录失败："+friendlyLoginError(err)+"\n\n可以重新发送 /login。", nil)
+		return
+	}
+	b.edit(ctx, chatID, msgID, fmt.Sprintf("✅ 已重新登录 <b>%s</b>，正在复查下载链路…", html.EscapeString(email)), nil)
+	b.recheck(ctx, chatID)
+}
+
+// recheck runs the health check now and reports the result to chatID; other
+// admins hear about a recovery through the usual change notice.
+func (b *Bot) recheck(ctx context.Context, chatID int64) {
+	if h := b.svc.health; h != nil && h.check != nil {
+		b.send(ctx, chatID, "🩺 下载链路："+healthLine(h.CheckNow(ctx)), nil)
+	}
+}
+
+func friendlyLoginError(err error) string {
+	if errors.Is(err, errNoCredentials) {
+		return "没有可用的账号密码：设置 UNFAIRPLAY_BOT_APPLE_ID_EMAIL / UNFAIRPLAY_BOT_APPLE_ID_PASSWORD，或在服务器上执行 <code>ipatool auth login</code>。"
+	}
+	return "<code>" + html.EscapeString(truncate(err.Error(), 300)) + "</code>"
+}
+
+// HealthChanged notifies admins when the App Store side breaks or recovers.
+func (b *Bot) HealthChanged(_, cur HealthState) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if cur.OK {
+		b.notifyAdmins(ctx, 0, notice("下载链路已恢复", "✅ App Store 登录与下载接口正常"), nil)
+		return
+	}
+	hint := "可能是 Apple 改了接口。ipatool 每 6 小时自动跟进上游，修复发布后服务器会自动更新。"
+	if cur.Error.Code == "auth_required" {
+		hint = "Apple 账号登录失效且自动重登未成功，检查环境变量中的密码，或发送 /login 重试。"
+	}
+	b.notifyAdmins(ctx, 0, notice("下载链路异常",
+		fmt.Sprintf("❗ <code>%s</code> %s", cur.Error.Code, html.EscapeString(truncate(cur.Error.Message, 300))),
+		"👉 "+hint), nil)
+}
+
+func healthLine(st HealthState) string {
+	switch {
+	case !st.Enabled:
+		return "未启用（设置 UNFAIRPLAY_BOT_HEALTH_APP_ID）"
+	case st.CheckedAt.IsZero():
+		return "尚未检查"
+	case st.OK:
+		return "✅ 正常（" + st.CheckedAt.Local().Format("01-02 15:04") + " 检查）"
+	}
+	return fmt.Sprintf("❌ 异常 <code>%s</code>（自 %s）", st.Error.Code, st.Since.Local().Format("01-02 15:04"))
 }
 
 // ---- parsing ----
@@ -500,6 +589,13 @@ var (
 	appIDPattern       = regexp.MustCompile(`^(?:id)?(\d{5,12})$`)
 	commandPattern     = regexp.MustCompile(`^/([a-z_]+)(?:@\w+)?(?:\s+(.*))?$`)
 )
+
+var authCodePattern = regexp.MustCompile(`^\d{6}$`)
+
+func parseAuthCode(text string) (string, bool) {
+	code := strings.ReplaceAll(strings.TrimSpace(text), " ", "")
+	return code, authCodePattern.MatchString(code)
+}
 
 func parseCommand(text string) (string, string, bool) {
 	m := commandPattern.FindStringSubmatch(text)
@@ -541,7 +637,8 @@ func helpText(admin bool) string {
 			"/status 服务状态与进行中的任务\n" +
 			"/users 白名单（可一键移除）\n" +
 			"/allow &lt;ID&gt; [备注] 添加白名单\n" +
-			"/revoke &lt;ID&gt; 移除白名单"
+			"/revoke &lt;ID&gt; 移除白名单\n" +
+			"/login 重新登录 Apple 账号"
 	}
 	return s
 }
@@ -786,7 +883,7 @@ func shortID() string {
 }
 
 // statusText renders /status for admins.
-func statusText(m *Manager, c *Cache, allow *Allowlist, versions map[string]string, account func() (string, error)) string {
+func statusText(m *Manager, c *Cache, h *Health, allow *Allowlist, versions map[string]string, account func() (string, error)) string {
 	st := m.Status()
 	cs := c.Stats()
 	var sb strings.Builder
@@ -796,6 +893,7 @@ func statusText(m *Manager, c *Cache, allow *Allowlist, versions map[string]stri
 	} else {
 		sb.WriteString("🍎 Apple 账号：" + html.EscapeString(email) + "\n")
 	}
+	sb.WriteString("🩺 下载链路：" + healthLine(h.State()) + "\n")
 	fmt.Fprintf(&sb, "⚙️ 运行中 %d · 排队 %d", st.Running, st.Queued)
 	if st.Draining {
 		sb.WriteString(" · 正在停机")

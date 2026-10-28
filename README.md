@@ -60,7 +60,11 @@ private chats.
   cancellation is sent to the admins. Notices use a `🔔 通知 · …` header and a
   quoted block, so they look different from replies to the admin's own
   requests. The admin's own requests produce no notices. If the Apple session
-  stops working, admins get a re-login alert (at most hourly).
+  stops working, see "App Store health" below.
+- **`/login` (admins only).** Signs the App Store account in again with the
+  configured (or saved) credentials. If Apple asks for a 2FA code, only the
+  admin who sent `/login` can answer it, within 10 minutes, by replying with
+  the 6 digits.
 
 ## API
 
@@ -112,10 +116,10 @@ sudo chown -R 10001:10001 data ipatool cache secrets
 sudo chmod 700 secrets/models && sudo chmod 600 secrets/models/*.bin
 docker compose up -d
 
-# Log in to ipatool once, inside the running container, with the same Apple
-# Account that produced the UnfairPlay model.
-docker compose exec -it bot ipatool auth login --email you@example.com \
-  --keychain-passphrase "$UNFAIRPLAY_BOT_KEYCHAIN_PASSPHRASE"
+# With UNFAIRPLAY_BOT_APPLE_ID_* set, the service signs in by itself. For a
+# 2FA account, send /login to the bot, or sign in inside the container:
+# docker compose exec -it bot ipatool auth login --email you@example.com \
+#   --keychain-passphrase "$UNFAIRPLAY_BOT_KEYCHAIN_PASSPHRASE"
 ```
 
 `secrets/models` is UnfairPlay's model registry: it may hold several `.bin`
@@ -135,12 +139,36 @@ The service needs two separate private credentials:
 | | UnfairPlay model (`.bin`) | ipatool session |
 |---|---|---|
 | Purpose | Decrypts IPAs | Signs in to the App Store to download them |
-| Created by | `unfairplay setup` on an enrolled Mac | `ipatool auth login` (Apple ID, password, 2FA code) |
-| Portable to another machine | **Yes.** Copy the file securely; UnfairPlay supports Linux decryption with a copied model | **No.** On macOS it lives in the system Keychain; log in again on the server |
-| Expiry | None in UnfairPlay | The App Store token expires; the bot re-logs in automatically with the saved password |
+| Created by | `unfairplay setup` on an enrolled Mac | The service itself, from `UNFAIRPLAY_BOT_APPLE_ID_EMAIL` / `_PASSWORD`, or `ipatool auth login` |
+| Portable to another machine | **Yes.** Copy the file securely; decryption is offline | **No.** On macOS it lives in the system Keychain; sign in again on the server |
+| Expiry | Never | The App Store token expires; the service signs in again automatically |
 
-Both must belong to the same Apple Account: the model decrypts IPAs whose
-licenses carry that account's FairPlay user and key selector.
+Both must belong to the same Apple ID: the model decrypts every IPA that
+account downloads.
+
+**Automatic sign-in** (accounts without 2FA): with the Apple ID set in `.env`,
+the service signs in on first start and whenever the session is missing,
+revoked, or expired. Failed automatic attempts are at least 15 minutes apart,
+and after `UNFAIRPLAY_BOT_AUTO_LOGIN_MAX_ATTEMPTS` (default 3) consecutive
+failures automatic sign-in stops, so a wrong password or a login flow Apple no
+longer accepts cannot get the account locked. The count survives restarts
+(`data/auto-login.json`) and resets after any successful sign-in; a manual
+`/login` is always allowed.
+
+## App Store health
+
+The likeliest outage is on the App Store side: a lost session, or Apple
+changing the login or download API under ipatool. With
+`UNFAIRPLAY_BOT_HEALTH_APP_ID` set to a free app the account owns, the
+service asks the App Store for that app's latest version every
+`UNFAIRPLAY_BOT_HEALTH_INTERVAL` (30 min). That is the same request a
+download starts with, minus the file transfer. Any task or preview that fails
+on the App Store side triggers an immediate re-check.
+
+Admins get one notice when the check starts failing (with the error and what
+to do: `/login` for a session problem, or wait for the automatic ipatool
+update for an API change) and one when it recovers. `/status` and
+`GET /v1/status` show the current state.
 
 ## Automatic dependency updates
 
@@ -152,11 +180,18 @@ licenses carry that account's FairPlay user and key selector.
    tests, builds both CLIs, commits the bump, and publishes
    `ghcr.io/<owner>/unfairplay-bot:latest`.
 2. On the server, `deploy/unfairplay-bot-update.timer` runs
-   `deploy/update.sh` hourly. It pulls the image and, if a personalized
-   encrypted IPA is in `./canary`, runs `unfairplay verify` with the private
-   model. If verification fails, it keeps the old version. Otherwise it waits
-   for the bot to be idle and restarts it. The bot also drains queued and
-   running tasks on SIGTERM.
+   `deploy/update.sh` hourly. It pulls the image and runs two canaries with
+   the new image before switching:
+   - **App Store:** `unfairplay-bot check` with the existing session, inside
+     the running container's network namespace so the MAC address (ipatool's
+     device identity) is the same. It never signs in. If it fails while the
+     running version is healthy, the update is rejected.
+   - **UnfairPlay:** `unfairplay verify` on an IPA in `./canary` with the
+     private model, offline.
+
+   If both pass, the updater waits for the bot to be idle, then restarts it.
+   If the running version is already unhealthy, it restarts immediately. The
+   bot also drains queued and running tasks on SIGTERM.
 
 ```sh
 sudo cp deploy/unfairplay-bot-update.* /etc/systemd/system/

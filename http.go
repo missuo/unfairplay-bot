@@ -206,7 +206,7 @@ func (s *Server) taskEvents(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"tasks": s.manager.Status(), "cache": s.cache.Stats(), "versions": s.versions,
+		"tasks": s.manager.Status(), "cache": s.cache.Stats(), "versions": s.versions, "health": s.health.State(),
 	})
 }
 

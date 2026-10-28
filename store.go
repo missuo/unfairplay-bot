@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -41,17 +42,38 @@ type Store struct {
 	purchase bool
 	country  string
 	http     *http.Client
-	mu       sync.Mutex // serializes keychain reads and re-login
+	creds    Credentials
+	guard    *loginGuard
+	mu       sync.Mutex // serializes keychain access and logins
+	now      func() time.Time
 }
 
-func NewStore(stateDir, passphrase string, purchase bool, country string) (*Store, error) {
+type StoreOptions struct {
+	StateDir, Passphrase string
+	Purchase             bool
+	Country              string
+	Credentials          Credentials
+	// GuardPath persists automatic-login failures across restarts.
+	GuardPath     string
+	MaxAutoLogins int
+}
+
+// Credentials, when set, let the service sign in by itself: on first start,
+// when the session is lost, and when the token expires. They take precedence
+// over the password ipatool saved in its keychain.
+type Credentials struct {
+	Email, Password string
+}
+
+func NewStore(o StoreOptions) (*Store, error) {
+	stateDir := o.StateDir
 	osys := operatingsystem.New()
 	mach := machine.New(machine.Args{OS: osys})
 	if stateDir == "" {
 		stateDir = defaultIpatoolStateDir(mach.HomeDirectory())
 	}
-	if _, err := os.Stat(stateDir); err != nil {
-		return nil, fmt.Errorf("ipatool state directory: %w (run `ipatool auth login` first)", err)
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		return nil, fmt.Errorf("ipatool state directory: %w", err)
 	}
 	jar, err := cookiejar.New(&cookiejar.Options{Filename: filepath.Join(stateDir, "cookies")})
 	if err != nil {
@@ -62,7 +84,7 @@ func NewStore(stateDir, passphrase string, purchase bool, country string) (*Stor
 		ServiceName:              ipatoolKeychainService,
 		KeychainTrustApplication: true,
 		FileDir:                  stateDir,
-		FilePasswordFunc:         keyring.FixedStringPrompt(passphrase),
+		FilePasswordFunc:         keyring.FixedStringPrompt(o.Passphrase),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open keyring: %w", err)
@@ -73,7 +95,14 @@ func NewStore(stateDir, passphrase string, purchase bool, country string) (*Stor
 		Machine:         mach,
 		Keychain:        keychain.New(keychain.Args{Keyring: ring, Label: ipatoolKeychainService}),
 	})
-	return &Store{as: as, purchase: purchase, country: country, http: &http.Client{Timeout: 15 * time.Second}}, nil
+	guard, err := openLoginGuard(o.GuardPath, o.MaxAutoLogins)
+	if err != nil {
+		return nil, err
+	}
+	return &Store{
+		as: as, purchase: o.Purchase, country: o.Country, creds: o.Credentials, guard: guard,
+		http: &http.Client{Timeout: 15 * time.Second}, now: time.Now,
+	}, nil
 }
 
 // defaultIpatoolStateDir mirrors ipatool's lookup without migrating anything.
@@ -90,14 +119,60 @@ func defaultIpatoolStateDir(home string) string {
 	return legacy
 }
 
+var errNoCredentials = &TaskError{Code: "auth_required", Message: "not signed in and no Apple ID credentials are configured; set UNFAIRPLAY_BOT_APPLE_ID_EMAIL and UNFAIRPLAY_BOT_APPLE_ID_PASSWORD or run `ipatool auth login` on the server"}
+
+// credentialsLocked picks the configured credentials, else the ones ipatool
+// saved with the session.
+func (s *Store) credentialsLocked() (Credentials, bool) {
+	if s.creds.Email != "" && s.creds.Password != "" {
+		return s.creds, true
+	}
+	info, err := s.as.AccountInfo()
+	if err != nil || info.Account.Email == "" || info.Account.Password == "" {
+		return Credentials{}, false
+	}
+	return Credentials{Email: info.Account.Email, Password: info.Account.Password}, true
+}
+
+// loginLocked signs in; automatic attempts respect the backoff.
+func (s *Store) loginLocked(code string, automatic bool) (appstore.Account, error) {
+	creds, ok := s.credentialsLocked()
+	if !ok {
+		return appstore.Account{}, errNoCredentials
+	}
+	if automatic {
+		if err := s.guard.allow(s.now()); err != nil {
+			return appstore.Account{}, err
+		}
+	}
+	out, err := s.as.Login(appstore.LoginInput{Email: creds.Email, Password: creds.Password, AuthCode: code})
+	if err != nil {
+		if automatic {
+			s.guard.failed(s.now())
+		}
+		if errors.Is(err, appstore.ErrAuthCodeRequired) {
+			return appstore.Account{}, err
+		}
+		return appstore.Account{}, &TaskError{Code: "auth_required", Message: "Apple ID login failed: " + err.Error()}
+	}
+	s.guard.succeeded()
+	slog.Info("signed in to the App Store", "email", creds.Email, "automatic", automatic)
+	return out.Account, nil
+}
+
+// account returns the signed-in account, signing in first when there is no
+// usable session and credentials are available.
 func (s *Store) account() (appstore.Account, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	info, err := s.as.AccountInfo()
-	if err != nil {
-		return appstore.Account{}, &TaskError{Code: "auth_required", Message: "no usable ipatool session: " + err.Error()}
+	if err == nil && info.Account.PasswordToken != "" {
+		return info.Account, nil
 	}
-	return info.Account, nil
+	if s.creds.Email == "" {
+		return appstore.Account{}, &TaskError{Code: "auth_required", Message: "no usable ipatool session; run `ipatool auth login` on the server or configure Apple ID credentials"}
+	}
+	return s.loginLocked("", true)
 }
 
 func (s *Store) relogin(stale appstore.Account) (appstore.Account, error) {
@@ -107,11 +182,32 @@ func (s *Store) relogin(stale appstore.Account) (appstore.Account, error) {
 	if info, err := s.as.AccountInfo(); err == nil && info.Account.PasswordToken != stale.PasswordToken {
 		return info.Account, nil
 	}
-	out, err := s.as.Login(appstore.LoginInput{Email: stale.Email, Password: stale.Password})
-	if err != nil {
-		return appstore.Account{}, &TaskError{Code: "auth_required", Message: "session expired and automatic re-login failed: " + err.Error()}
+	acc, err := s.loginLocked("", true)
+	if errors.Is(err, appstore.ErrAuthCodeRequired) {
+		return acc, &TaskError{Code: "auth_required", Message: "Apple asked for a 2FA code; send /login to the bot"}
 	}
-	return out.Account, nil
+	return acc, err
+}
+
+// StartLogin is the admin's manual sign-in. For a 2FA account Apple sends a
+// code to trusted devices and needsCode is returned; FinishLogin completes it.
+func (s *Store) StartLogin() (email string, needsCode bool, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	creds, _ := s.credentialsLocked()
+	_, err = s.loginLocked("", false)
+	if errors.Is(err, appstore.ErrAuthCodeRequired) {
+		return creds.Email, true, nil
+	}
+	return creds.Email, false, err
+}
+
+func (s *Store) FinishLogin(code string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	creds, _ := s.credentialsLocked()
+	_, err := s.loginLocked(code, false)
+	return creds.Email, err
 }
 
 // call runs fn with the current account, refreshing an expired token and
@@ -245,4 +341,14 @@ func classify(err error) *TaskError {
 		return &TaskError{Code: "unavailable", Message: err.Error()}
 	}
 	return &TaskError{Code: "store_error", Message: err.Error()}
+}
+
+// Check makes the same App Store request a download starts with
+// (download-product, via ListVersions) for a known app, without downloading.
+func (s *Store) Check(ctx context.Context, appID int64) error {
+	app := appstore.App{ID: appID}
+	return s.call(&app, func(acc appstore.Account) error {
+		_, err := s.as.ListVersions(appstore.ListVersionsInput{Context: ctx, Account: acc, App: app, Platform: platform})
+		return err
+	})
 }

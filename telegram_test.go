@@ -107,7 +107,7 @@ func newTestBot(t *testing.T) (*Bot, *fakeMessenger, *fakePipeline) {
 		t.Fatal(err)
 	}
 	fm := newFakeMessenger()
-	return NewBot(fm, svc, []int64{adminID}, allow, func() string { return "status" }), fm, p
+	return NewBot(fm, svc, []int64{adminID}, allow, &fakeAuth{}, func() string { return "status" }), fm, p
 }
 
 func message(from int64, text string) tgUpdate {
@@ -316,4 +316,122 @@ func TestRenderingEscapesHTML(t *testing.T) {
 	if got := formatDuration(76 * time.Second); got != "1分16秒" {
 		t.Errorf("formatDuration = %s", got)
 	}
+}
+
+type fakeAuth struct {
+	mu        sync.Mutex
+	needsCode bool
+	starts    int
+	codes     []string
+}
+
+func (f *fakeAuth) StartLogin() (string, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.starts++
+	return "me@example.com", f.needsCode, nil
+}
+
+func (f *fakeAuth) FinishLogin(code string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.codes = append(f.codes, code)
+	return "me@example.com", nil
+}
+
+func TestBotLoginIsAdminOnly(t *testing.T) {
+	b, fm, _ := newTestBot(t)
+	auth := b.auth.(*fakeAuth)
+	ctx := context.Background()
+	b.allow.Allow(AllowedUser{ID: friendID})
+
+	b.Handle(ctx, message(friendID, "/login"))
+	fm.waitFor(t, friendID, "只有管理员")
+	b.Handle(ctx, message(strangerID, "/login"))
+	fm.waitFor(t, strangerID, "还没有使用权限")
+	if auth.starts != 0 {
+		t.Fatal("non-admin started a login")
+	}
+
+	b.Handle(ctx, message(adminID, "/login"))
+	fm.waitFor(t, adminID, "已重新登录")
+	if auth.starts != 1 {
+		t.Fatalf("starts = %d", auth.starts)
+	}
+}
+
+func TestBotLoginTwoFactorCodeOnlyFromInitiatingAdmin(t *testing.T) {
+	b, fm, _ := newTestBot(t)
+	auth := b.auth.(*fakeAuth)
+	auth.needsCode = true
+	ctx := context.Background()
+	b.allow.Allow(AllowedUser{ID: friendID})
+
+	b.Handle(ctx, message(adminID, "/login"))
+	fm.waitFor(t, adminID, "回复 6 位数字")
+
+	// An allowed non-admin sending six digits gets an app lookup, not a login.
+	b.Handle(ctx, message(friendID, "123456"))
+	fm.waitFor(t, friendID, "是这个 App 吗")
+	if len(auth.codes) != 0 {
+		t.Fatal("non-admin message was used as a 2FA code")
+	}
+
+	b.Handle(ctx, message(adminID, "654 321"))
+	fm.waitFor(t, adminID, "已重新登录")
+	if len(auth.codes) != 1 || auth.codes[0] != "654321" {
+		t.Fatalf("codes = %v", auth.codes)
+	}
+	// The wait is consumed: the next six digits are an app ID again.
+	b.Handle(ctx, message(adminID, "111111"))
+	if len(auth.codes) != 1 {
+		t.Fatal("code accepted without a pending login")
+	}
+}
+
+func TestBotLoginCodeExpires(t *testing.T) {
+	b, fm, _ := newTestBot(t)
+	auth := b.auth.(*fakeAuth)
+	auth.needsCode = true
+	ctx := context.Background()
+	b.Handle(ctx, message(adminID, "/login"))
+	fm.waitFor(t, adminID, "回复 6 位数字")
+	b.now = func() time.Time { return time.Now().Add(loginCodeTTL + time.Minute) }
+	b.Handle(ctx, message(adminID, "/login 123456"))
+	fm.waitFor(t, adminID, "没有等待中的登录")
+	if len(auth.codes) != 0 {
+		t.Fatal("expired code accepted")
+	}
+}
+
+func TestHealthNotifiesOnlyOnChange(t *testing.T) {
+	b, fm, _ := newTestBot(t)
+	var fail error = &TaskError{Code: "auth_required", Message: "token expired"}
+	var mu sync.Mutex
+	h := NewHealth(func(context.Context) error { mu.Lock(); defer mu.Unlock(); return fail }, time.Hour)
+	h.SetOnChange(b.HealthChanged)
+	ctx := context.Background()
+
+	h.CheckNow(ctx)
+	n := fm.waitFor(t, adminID, "下载链路异常")
+	if !strings.Contains(n.text, "/login") {
+		t.Fatalf("auth failure notice lacks the /login hint: %s", n.text)
+	}
+	h.CheckNow(ctx)
+	count := 0
+	for _, m := range fm.msgs {
+		if strings.Contains(m.text, "下载链路异常") {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("got %d failure notices, want 1", count)
+	}
+	mu.Lock()
+	fail = nil
+	mu.Unlock()
+	if st := h.CheckNow(ctx); !st.OK {
+		t.Fatal("expected healthy")
+	}
+	fm.waitFor(t, adminID, "下载链路已恢复")
 }

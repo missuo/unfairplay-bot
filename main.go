@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -17,6 +18,9 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "check" {
+		os.Exit(runCheck())
+	}
 	if err := run(); err != nil {
 		slog.Error("fatal", "err", err)
 		os.Exit(1)
@@ -41,19 +45,30 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	store, err := NewStore(cfg.IpatoolStateDir, cfg.KeychainPassphrase, cfg.Purchase, cfg.StoreCountry)
+	store, err := NewStore(StoreOptions{
+		StateDir: cfg.IpatoolStateDir, Passphrase: cfg.KeychainPassphrase, Purchase: cfg.Purchase,
+		Country: cfg.StoreCountry, Credentials: cfg.AppleID,
+		GuardPath: filepath.Join(cfg.DataDir, "auto-login.json"), MaxAutoLogins: cfg.MaxAutoLogins,
+	})
 	if err != nil {
 		return err
 	}
-	manager, err := NewManager(ManagerOptions{
+	var check func(context.Context) error
+	if cfg.HealthAppID != 0 {
+		check = func(ctx context.Context) error { return store.Check(ctx, cfg.HealthAppID) }
+	}
+	health := NewHealth(check, cfg.HealthInterval)
+	svc := &Service{resolver: store, cache: cache, health: health, signer: Signer{key: cfg.SigningKey, base: cfg.PublicURL}}
+	svc.manager, err = NewManager(ManagerOptions{
 		Concurrency: cfg.Concurrency, DecryptConcurrency: cfg.DecryptConcurrency, MaxQueue: cfg.MaxQueue,
 		Timeout: cfg.TaskTimeout, Retention: cfg.TaskRetention, WorkDir: filepath.Join(cfg.DataDir, "work"),
+		OnFailure: svc.StoreFailed,
 	}, pipeline{Store: store, Decrypter: Decrypter{Bin: cfg.UnfairplayBin, Model: cfg.ModelPath}}, cache)
 	if err != nil {
 		return err
 	}
+	manager := svc.manager
 
-	svc := &Service{resolver: store, manager: manager, cache: cache, signer: Signer{key: cfg.SigningKey, base: cfg.PublicURL}}
 	srv := &Server{Service: svc, token: cfg.APIToken, versions: buildVersions()}
 	if cfg.TelegramToken != "" {
 		allow, err := OpenAllowlist(filepath.Join(cfg.DataDir, "telegram-allowlist.json"))
@@ -61,9 +76,10 @@ func run() error {
 			return err
 		}
 		client := newTGClient(cfg.TelegramAPIURL, cfg.TelegramToken)
-		bot := NewBot(client, svc, cfg.TelegramAdmins, allow, func() string {
-			return statusText(manager, cache, allow, srv.versions, store.AccountEmail)
+		bot := NewBot(client, svc, cfg.TelegramAdmins, allow, store, func() string {
+			return statusText(manager, cache, health, allow, srv.versions, store.AccountEmail)
 		})
+		health.SetOnChange(bot.HealthChanged)
 		botCtx, stopBot := context.WithCancel(context.Background())
 		// The bot outlives the signal so it can keep reporting while tasks drain.
 		defer stopBot()
@@ -71,6 +87,10 @@ func run() error {
 		slog.Info("telegram bot enabled", "admins", cfg.TelegramAdmins)
 	}
 	httpServer := &http.Server{Addr: cfg.Listen, Handler: srv.Routes(), ReadHeaderTimeout: 10 * time.Second}
+
+	healthCtx, stopHealth := context.WithCancel(context.Background())
+	defer stopHealth()
+	go health.Run(healthCtx)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -113,6 +133,38 @@ func run() error {
 		return err
 	}
 	return nil
+}
+
+// runCheck is the `check` subcommand used by deploy/update.sh to prove a new
+// image can still talk to the App Store with the existing session before it
+// replaces the running one. It never logs in by itself. Exit codes: 0 ok,
+// 1 failed, 2 not configured.
+func runCheck() int {
+	cfg, err := LoadConfig()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	if cfg.HealthAppID == 0 {
+		fmt.Fprintln(os.Stderr, "UNFAIRPLAY_BOT_HEALTH_APP_ID is not set; skipping App Store check")
+		return 2
+	}
+	store, err := NewStore(StoreOptions{
+		StateDir: cfg.IpatoolStateDir, Passphrase: cfg.KeychainPassphrase, Country: cfg.StoreCountry,
+		MaxAutoLogins: 0, // automatic login always refused
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	if err := store.Check(ctx, cfg.HealthAppID); err != nil {
+		fmt.Fprintln(os.Stderr, "App Store check failed:", classify(err).Error())
+		return 1
+	}
+	fmt.Println("App Store check passed")
+	return 0
 }
 
 // buildVersions reports the dependency versions compiled in, plus the
