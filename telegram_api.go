@@ -129,20 +129,21 @@ func (c *tgClient) call(ctx context.Context, method string, params, out any) err
 	}
 }
 
-func markup(kb Keyboard) any {
-	if kb == nil {
-		return nil
+func messageParams(chatID int64, html string, kb Keyboard) map[string]any {
+	params := map[string]any{
+		"chat_id": chatID, "text": html, "parse_mode": "HTML",
+		"link_preview_options": map[string]any{"is_disabled": true},
 	}
-	return map[string]any{"inline_keyboard": kb}
+	// Telegram rejects "reply_markup": null; omit it when there are no buttons.
+	if kb != nil {
+		params["reply_markup"] = map[string]any{"inline_keyboard": kb}
+	}
+	return params
 }
 
 func (c *tgClient) Send(ctx context.Context, chatID int64, html string, kb Keyboard) (int, error) {
 	var msg tgMessage
-	err := c.call(ctx, "sendMessage", map[string]any{
-		"chat_id": chatID, "text": html, "parse_mode": "HTML",
-		"link_preview_options": map[string]any{"is_disabled": true},
-		"reply_markup":         markup(kb),
-	}, &msg)
+	err := c.call(ctx, "sendMessage", messageParams(chatID, html, kb), &msg)
 	return msg.MessageID, err
 }
 
@@ -150,11 +151,9 @@ func (c *tgClient) Edit(ctx context.Context, chatID int64, messageID int, html s
 	if kb == nil {
 		kb = Keyboard{} // an empty keyboard removes old buttons
 	}
-	err := c.call(ctx, "editMessageText", map[string]any{
-		"chat_id": chatID, "message_id": messageID, "text": html, "parse_mode": "HTML",
-		"link_preview_options": map[string]any{"is_disabled": true},
-		"reply_markup":         markup(kb),
-	}, nil)
+	params := messageParams(chatID, html, kb)
+	params["message_id"] = messageID
+	err := c.call(ctx, "editMessageText", params, nil)
 	if e, ok := err.(*tgError); ok && strings.Contains(e.Description, "message is not modified") {
 		return nil
 	}
