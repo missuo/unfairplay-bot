@@ -363,3 +363,55 @@ func (s *Store) Check(ctx context.Context, appID int64) error {
 		return err
 	})
 }
+
+// Search finds iOS apps in the Apple ID's storefront. It never acquires
+// licenses.
+func (s *Store) Search(ctx context.Context, term string, limit int) ([]AppInfo, error) {
+	var results []appstore.App
+	err := s.call(&appstore.App{}, false, func(acc appstore.Account) error {
+		out, err := s.as.Search(appstore.SearchInput{Account: acc, Term: term, Limit: int64(limit), Platform: platform})
+		results = out.Results
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	infos := make([]AppInfo, 0, len(results))
+	for _, app := range results {
+		infos = append(infos, AppInfo{
+			Target: Target{AppID: app.ID, BundleID: app.BundleID, Name: app.Name, Version: app.Version},
+			Price:  app.Price,
+		})
+	}
+	return infos, nil
+}
+
+// AccountSummary is what `ipatool auth info` shows, plus the session and
+// automatic sign-in state. It reads local state only.
+type AccountSummary struct {
+	Email, Name  string
+	SignedIn     bool
+	AutoLogin    bool // Apple ID credentials are configured
+	Failures     int  // consecutive failed automatic sign-ins
+	MaxFailures  int
+	LastFailure  time.Time
+	KeychainNote string // why the saved account could not be read, if so
+}
+
+func (s *Store) AccountSummary() AccountSummary {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sum := AccountSummary{
+		AutoLogin: s.creds.Email != "" && s.creds.Password != "",
+		Failures:  s.guard.Failures, MaxFailures: s.guard.maxFailures, LastFailure: s.guard.LastFailure,
+	}
+	info, err := s.as.AccountInfo()
+	if err != nil {
+		sum.KeychainNote = err.Error()
+		sum.Email = s.creds.Email
+		return sum
+	}
+	sum.Email, sum.Name = info.Account.Email, info.Account.Name
+	sum.SignedIn = info.Account.PasswordToken != ""
+	return sum
+}

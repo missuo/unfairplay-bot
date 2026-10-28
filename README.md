@@ -45,6 +45,9 @@ private chats.
   bot replies with the name, developer, current version and release date,
   size, price, and whether that build is already cached. Nothing is queued
   until the user taps **✅** within 10 minutes.
+- **Search.** `/search <name>` lists up to 10 matches from the Apple ID's
+  storefront as buttons; tapping one opens the same preview. Neither search
+  nor a preview adds an app to the Apple ID; that happens only after **✅**.
 - **One live message per task.** The confirmation message turns into a
   progress view: queue position, download bar with speed and ETA, then
   decryption, then a download button. Users can cancel their own tasks;
@@ -53,8 +56,11 @@ private chats.
   ID and a "no access" reply, and admins receive an access request with
   **✅ Allow** / **🚫 Ignore** buttons (at most once per 6 h per person). Admin
   commands: `/allow <id> [note]`, `/revoke <id>`, `/users` (with one-tap
-  removal), and `/status` (Apple Account, queue, cache, versions, active
-  tasks). The allowlist is stored in `data/telegram-allowlist.json`.
+  removal), `/status` (Apple Account, queue, cache, versions, active
+  tasks), `/health` (what `ipatool auth info` shows, the session and
+  automatic sign-in state, and a live App Store request), and `/clear`
+  (after a confirmation, delete every cached IPA regardless of expiry; issued
+  links stop working, tasks in progress are unaffected). The allowlist is stored in `data/telegram-allowlist.json`.
 - **Admin notices.** Every request by a non-admin (new task, joined an
   in-progress task, or cache hit) and every completion, failure, or
   cancellation is sent to the admins. Notices use a `🔔 Notice · …` header and a

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -323,6 +324,7 @@ type fakeAuth struct {
 	needsCode bool
 	starts    int
 	codes     []string
+	searches  []string
 }
 
 func (f *fakeAuth) StartLogin() (string, bool, error) {
@@ -330,6 +332,20 @@ func (f *fakeAuth) StartLogin() (string, bool, error) {
 	defer f.mu.Unlock()
 	f.starts++
 	return "me@example.com", f.needsCode, nil
+}
+
+func (f *fakeAuth) AccountSummary() AccountSummary {
+	return AccountSummary{Email: "me@example.com", Name: "Me", SignedIn: true, AutoLogin: true, MaxFailures: 3}
+}
+
+func (f *fakeAuth) Search(_ context.Context, term string, limit int) ([]AppInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.searches = append(f.searches, term)
+	return []AppInfo{
+		{Target: Target{AppID: 12345, BundleID: "com.example.one", Name: "Example <One>", Version: "1.0"}},
+		{Target: Target{AppID: 67890, BundleID: "com.example.two", Name: "Example Two", Version: "2.0"}, Price: 2.99},
+	}, nil
 }
 
 func (f *fakeAuth) FinishLogin(code string) (string, error) {
@@ -478,4 +494,114 @@ func TestBotPreviewNeverAcquiresLicense(t *testing.T) {
 	}
 	close(p.gate("12345:80"))
 	fm.waitFor(t, adminID, "is ready")
+}
+
+func TestBotSearchListsResultsThatOpenPreview(t *testing.T) {
+	b, fm, _ := newTestBot(t)
+	auth := b.auth.(*fakeAuth)
+	res := b.svc.resolver.(*fakeResolver)
+	ctx := context.Background()
+	b.allow.Allow(AllowedUser{ID: friendID})
+
+	b.Handle(ctx, message(strangerID, "/search wechat"))
+	fm.waitFor(t, strangerID, "don't have access yet")
+	if len(auth.searches) != 0 {
+		t.Fatal("a stranger could search")
+	}
+
+	b.Handle(ctx, message(friendID, "/search"))
+	fm.waitFor(t, friendID, "Usage: <code>/search")
+
+	b.Handle(ctx, message(friendID, "/search wechat"))
+	list := fm.waitFor(t, friendID, "Results for")
+	if !strings.Contains(list.text, "Example &lt;One&gt;") || !strings.Contains(list.text, "2.99") {
+		t.Fatalf("results: %s", list.text)
+	}
+	data := buttonData(list, callbackPreview)
+	if data != callbackPreview+"12345" || len(list.kb) != 2 {
+		t.Fatalf("buttons: %+v", list.kb)
+	}
+
+	b.Handle(ctx, click(friendID, list, data))
+	fm.waitFor(t, friendID, "Is this the right app")
+	if len(res.purchases) != 1 || res.purchases[0] {
+		t.Fatalf("search preview resolved with purchase flags %v", res.purchases)
+	}
+	if s := b.svc.manager.Status(); s.Running+s.Queued != 0 {
+		t.Fatal("search created a task")
+	}
+
+	// Plain text that is not an ID points to /search instead of searching.
+	b.Handle(ctx, message(friendID, "wechat"))
+	fm.waitFor(t, friendID, "/search wechat")
+	if len(auth.searches) != 1 {
+		t.Fatal("plain text should not search")
+	}
+}
+
+func TestBotHealthIsAdminOnly(t *testing.T) {
+	b, fm, _ := newTestBot(t)
+	ctx := context.Background()
+	b.allow.Allow(AllowedUser{ID: friendID})
+	checks := 0
+	b.svc.health = NewHealth(func(context.Context) error { checks++; return nil }, time.Hour)
+
+	b.Handle(ctx, message(friendID, "/health"))
+	fm.waitFor(t, friendID, "Only admins")
+	if checks != 0 {
+		t.Fatal("non-admin triggered a health check")
+	}
+
+	b.Handle(ctx, message(adminID, "/health"))
+	m := fm.waitFor(t, adminID, "App Store: ✅ OK")
+	for _, want := range []string{"Me · me@example.com", "Session: ✅ signed in", "Auto sign-in: ✅ enabled"} {
+		if !strings.Contains(m.text, want) {
+			t.Fatalf("health report lacks %q:\n%s", want, m.text)
+		}
+	}
+	if checks != 1 {
+		t.Fatalf("checks = %d, want a live check", checks)
+	}
+}
+
+func TestBotClearIsAdminOnlyAndConfirmed(t *testing.T) {
+	b, fm, _ := newTestBot(t)
+	ctx := context.Background()
+	b.allow.Allow(AllowedUser{ID: friendID})
+	for _, key := range []string{"1:1", "2:1"} {
+		src := filepath.Join(t.TempDir(), "a.ipa")
+		os.WriteFile(src, []byte("ipa"), 0o600)
+		if _, err := b.svc.cache.Add(Artifact{Key: key, Size: 3}, src); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	b.Handle(ctx, message(friendID, "/clear"))
+	fm.waitFor(t, friendID, "Only admins")
+
+	b.Handle(ctx, message(adminID, "/clear"))
+	ask := fm.waitFor(t, adminID, "Delete all <b>2</b>")
+	if b.svc.cache.Stats().Artifacts != 2 {
+		t.Fatal("cleared before confirmation")
+	}
+	// A non-admin pressing the button does nothing.
+	b.Handle(ctx, click(friendID, ask, callbackClear+"yes"))
+	if b.svc.cache.Stats().Artifacts != 2 {
+		t.Fatal("non-admin cleared the cache")
+	}
+	b.Handle(ctx, click(adminID, ask, callbackClear+"no"))
+	if b.svc.cache.Stats().Artifacts != 2 {
+		t.Fatal("cancel cleared the cache")
+	}
+	b.Handle(ctx, click(adminID, ask, callbackClear+"yes"))
+	fm.waitFor(t, adminID, "Deleted 2 cached IPA(s)")
+	if st := b.svc.cache.Stats(); st.Artifacts != 0 || st.Bytes != 0 {
+		t.Fatalf("stats after clear: %+v", st)
+	}
+	entries, _ := os.ReadDir(b.svc.cache.dir)
+	if len(entries) != 0 {
+		t.Fatalf("files left in the cache directory: %d", len(entries))
+	}
+	b.Handle(ctx, message(adminID, "/clear"))
+	fm.waitFor(t, adminID, "already empty")
 }

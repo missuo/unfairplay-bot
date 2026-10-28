@@ -26,14 +26,20 @@ const (
 	callbackAllow     = "al:"
 	callbackIgnore    = "ig:"
 	callbackRevoke    = "rv:"
+	callbackPreview   = "pv:"
+	callbackClear     = "cc:"
+	searchLimit       = 10
 	noticeHeaderEmoji = "🔔"
 	loginCodeTTL      = 10 * time.Minute
 )
 
-// Authenticator signs the App Store account in again (admin-only /login).
-type Authenticator interface {
+// StoreOps is the App Store account access the bot needs beyond the
+// Service: admin sign-in and health, and user search.
+type StoreOps interface {
 	StartLogin() (email string, needsCode bool, err error)
 	FinishLogin(code string) (email string, err error)
+	AccountSummary() AccountSummary
+	Search(ctx context.Context, term string, limit int) ([]AppInfo, error)
 }
 
 type pendingRequest struct {
@@ -56,11 +62,11 @@ type Bot struct {
 	pending   map[string]*pendingRequest
 	watchers  map[string]map[int64]bool // task ID -> users following it
 	requested map[int64]time.Time       // last access request per stranger
-	auth      Authenticator
+	auth      StoreOps
 	loginWait map[int64]time.Time // admin -> when Apple sent a 2FA code
 }
 
-func NewBot(api Messenger, svc *Service, admins []int64, allow *Allowlist, auth Authenticator, statusFn func() string) *Bot {
+func NewBot(api Messenger, svc *Service, admins []int64, allow *Allowlist, auth StoreOps, statusFn func() string) *Bot {
 	b := &Bot{
 		api: api, svc: svc, admins: map[int64]bool{}, allow: allow, auth: auth, statusFn: statusFn, now: time.Now,
 		pending: map[string]*pendingRequest{}, watchers: map[string]map[int64]bool{}, requested: map[int64]time.Time{},
@@ -75,10 +81,13 @@ func NewBot(api Messenger, svc *Service, admins []int64, allow *Allowlist, auth 
 var userCommands = []botCommand{
 	{Command: "start", Description: "How to use this bot"},
 	{Command: "help", Description: "How to use this bot"},
+	{Command: "search", Description: "Search the App Store: /search <name>"},
 }
 
 var adminCommands = append(append([]botCommand{}, userCommands...),
 	botCommand{Command: "status", Description: "Service status and active tasks"},
+	botCommand{Command: "health", Description: "Check the Apple ID session and the App Store now"},
+	botCommand{Command: "clear", Description: "Delete every cached IPA to free disk space"},
 	botCommand{Command: "users", Description: "Allowed users"},
 	botCommand{Command: "allow", Description: "Allow a user: /allow <ID> [note]"},
 	botCommand{Command: "revoke", Description: "Remove a user: /revoke <ID>"},
@@ -177,7 +186,7 @@ func (b *Bot) handleMessage(ctx context.Context, m *tgMessage) {
 	}
 	bundleID, appID, ok := parseQuery(text)
 	if !ok {
-		b.send(ctx, m.Chat.ID, helpText(b.admins[user.ID]), nil)
+		b.send(ctx, m.Chat.ID, "Send an App ID, a bundle ID, or an App Store link. To search by name, use <code>/search "+html.EscapeString(truncate(text, 40))+"</code>.", nil)
 		return
 	}
 	b.preview(ctx, m.Chat.ID, user, bundleID, appID)
@@ -204,10 +213,22 @@ func (b *Bot) handleCommand(ctx context.Context, m *tgMessage, cmd, args string)
 	switch {
 	case cmd == "start" || cmd == "help":
 		b.send(ctx, m.Chat.ID, helpText(isAdmin), nil)
+	case cmd == "search":
+		b.search(ctx, m.Chat.ID, args)
 	case !isAdmin:
 		b.send(ctx, m.Chat.ID, "Only admins can use this command.", nil)
 	case cmd == "status":
 		b.send(ctx, m.Chat.ID, b.statusFn(), nil)
+	case cmd == "health":
+		b.health(ctx, m.Chat.ID)
+	case cmd == "clear":
+		st := b.svc.cache.Stats()
+		if st.Artifacts == 0 {
+			b.send(ctx, m.Chat.ID, "🗑 The cache is already empty.", nil)
+			return
+		}
+		b.send(ctx, m.Chat.ID, fmt.Sprintf("🗑 Delete all <b>%d</b> cached IPA(s), <b>%s</b>?\n\nThis ignores the cache policy. Every download link already sent stops working, and the next request for any app downloads it again. Tasks in progress are not affected.", st.Artifacts, formatBytes(st.Bytes)),
+			Keyboard{{{Text: "🗑 Clear all", Data: callbackClear + "yes"}, {Text: "Cancel", Data: callbackClear + "no"}}})
 	case cmd == "users":
 		b.sendUsers(ctx, m.Chat.ID)
 	case cmd == "allow":
@@ -349,6 +370,13 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgCallback) {
 		}
 		b.start(ctx, p, msgID)
 
+	case callbackPreview:
+		id, err := strconv.ParseInt(arg, 10, 64)
+		if err != nil || id <= 0 {
+			return
+		}
+		b.preview(ctx, chatID, cb.From, "", id)
+
 	case callbackCancel:
 		b.mu.Lock()
 		following := b.watchers[arg][cb.From.ID]
@@ -362,6 +390,19 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgCallback) {
 			return
 		}
 		answer = "Canceling…"
+
+	case callbackClear:
+		if !isAdmin {
+			answer = "Admins only"
+			return
+		}
+		if arg != "yes" {
+			b.edit(ctx, chatID, msgID, "🗑 Cache left as it is.", nil)
+			return
+		}
+		n, bytes := b.svc.cache.Clear()
+		answer = "Cache cleared"
+		b.edit(ctx, chatID, msgID, fmt.Sprintf("🗑 Deleted %d cached IPA(s), freed %s.", n, formatBytes(bytes)), nil)
 
 	case callbackAllow, callbackIgnore, callbackRevoke:
 		if !isAdmin {
@@ -509,6 +550,92 @@ func (b *Bot) finished(ctx context.Context, user tgUser, info AppInfo, v TaskVie
 	}
 }
 
+// search lists App Store matches as buttons; tapping one opens the usual
+// preview, so nothing is acquired until the user confirms there.
+func (b *Bot) search(ctx context.Context, chatID int64, term string) {
+	term = strings.TrimSpace(term)
+	if term == "" {
+		b.send(ctx, chatID, "Usage: <code>/search &lt;app name&gt;</code>", nil)
+		return
+	}
+	msgID := b.send(ctx, chatID, "🔎 Searching the App Store…", nil)
+	sctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	results, err := b.auth.Search(sctx, truncate(term, 100), searchLimit)
+	if err != nil {
+		te := classify(err)
+		b.svc.StoreFailed(te)
+		b.edit(ctx, chatID, msgID, "❌ Search failed: "+friendlyError(te), nil)
+		return
+	}
+	if len(results) == 0 {
+		b.edit(ctx, chatID, msgID, fmt.Sprintf("No apps found for “%s”.", html.EscapeString(term)), nil)
+		return
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "🔎 <b>Results for “%s”</b>\n", html.EscapeString(term))
+	var kb Keyboard
+	for i, r := range results {
+		price := "Free"
+		if r.Price > 0 {
+			price = fmt.Sprintf("%.2f", r.Price)
+		}
+		fmt.Fprintf(&sb, "\n%d. <b>%s</b> %s\n    <code>%s</code> · %s", i+1,
+			html.EscapeString(firstNonEmpty(r.Name, strconv.FormatInt(r.AppID, 10))), html.EscapeString(r.Version),
+			html.EscapeString(r.BundleID), price)
+		kb = append(kb, []Button{{Text: fmt.Sprintf("%d. %s", i+1, truncate(firstNonEmpty(r.Name, r.BundleID), 40)), Data: callbackPreview + strconv.FormatInt(r.AppID, 10)}})
+	}
+	sb.WriteString("\n\nTap an app to see its details.")
+	b.edit(ctx, chatID, msgID, sb.String(), kb)
+}
+
+// health reports what `ipatool auth info` shows, plus a live App Store
+// request, since a session Apple revoked still looks fine locally.
+func (b *Bot) health(ctx context.Context, chatID int64) {
+	msgID := b.send(ctx, chatID, "🩺 Checking…", nil)
+	sum := b.auth.AccountSummary()
+	var sb strings.Builder
+	sb.WriteString("🩺 <b>Health</b>\n\n")
+	if sum.Email != "" {
+		who := html.EscapeString(sum.Email)
+		if sum.Name != "" {
+			who = html.EscapeString(sum.Name) + " · " + who
+		}
+		sb.WriteString("🍎 Apple ID: " + who + "\n")
+	}
+	switch {
+	case sum.SignedIn:
+		sb.WriteString("🔑 Session: ✅ signed in\n")
+	case sum.KeychainNote != "":
+		sb.WriteString("🔑 Session: ❌ not signed in (<code>" + html.EscapeString(truncate(sum.KeychainNote, 120)) + "</code>)\n")
+	default:
+		sb.WriteString("🔑 Session: ❌ no token\n")
+	}
+	switch {
+	case !sum.AutoLogin:
+		sb.WriteString("🔁 Auto sign-in: not configured\n")
+	case sum.Failures >= sum.MaxFailures:
+		fmt.Fprintf(&sb, "🔁 Auto sign-in: ❌ stopped after %d failures; send /login after checking the password\n", sum.Failures)
+	case sum.Failures > 0:
+		fmt.Fprintf(&sb, "🔁 Auto sign-in: ⚠️ %d/%d failures (last %s)\n", sum.Failures, sum.MaxFailures, sum.LastFailure.Local().Format("Jan 2 15:04"))
+	default:
+		sb.WriteString("🔁 Auto sign-in: ✅ enabled\n")
+	}
+	if h := b.svc.health; h != nil && h.check != nil {
+		started := b.now()
+		st := h.CheckNow(ctx)
+		took := b.now().Sub(started).Round(10 * time.Millisecond)
+		if st.OK {
+			fmt.Fprintf(&sb, "📡 App Store: ✅ OK (%s)\n", took)
+		} else {
+			fmt.Fprintf(&sb, "📡 App Store: ❌ <code>%s</code> %s\n", st.Error.Code, html.EscapeString(truncate(st.Error.Message, 200)))
+		}
+	} else {
+		sb.WriteString("📡 App Store: not checked (set UNFAIRPLAY_BOT_HEALTH_APP_ID)\n")
+	}
+	b.edit(ctx, chatID, msgID, sb.String(), nil)
+}
+
 // ---- App Store session (admin only) ----
 
 func (b *Bot) takeLoginWait(adminID int64) bool {
@@ -641,12 +768,15 @@ func helpText(admin bool) string {
 		"Send any of these and I'll look the app up so you can confirm it:\n" +
 		"• App ID: <code>414478124</code>\n" +
 		"• Bundle ID: <code>com.tencent.xin</code>\n" +
-		"• App Store link: <code>https://apps.apple.com/app/id414478124</code>\n\n" +
+		"• App Store link: <code>https://apps.apple.com/app/id414478124</code>\n" +
+		"Or search by name: <code>/search WeChat</code>\n\n" +
 		"Once you confirm, I download the current version, decrypt it, and send you a download link.\n" +
 		"If that version is already cached, you get the link right away."
 	if admin {
 		s += "\n\n<b>Admin commands</b>\n" +
 			"/status Service status and active tasks\n" +
+			"/health Check the Apple ID session and the App Store now\n" +
+			"/clear Delete every cached IPA to free disk space\n" +
 			"/users Allowed users (with one-tap removal)\n" +
 			"/allow &lt;ID&gt; [note] Allow a user\n" +
 			"/revoke &lt;ID&gt; Remove a user\n" +

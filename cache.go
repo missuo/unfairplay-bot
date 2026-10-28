@@ -256,3 +256,19 @@ func (c *Cache) Stats() CacheStats {
 	}
 	return s
 }
+
+// Clear deletes every artifact regardless of expiry and reports how many
+// files and bytes were removed. Downloads already in progress keep reading
+// their open files; issued links stop working.
+func (c *Cache) Clear() (int, int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n, bytes := 0, int64(0)
+	for id, a := range c.items {
+		n++
+		bytes += a.Size
+		c.deleteLocked(id)
+	}
+	slog.Info("cache cleared", "artifacts", n, "bytes", bytes)
+	return n, bytes
+}
