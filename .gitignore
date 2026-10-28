@@ -1,0 +1,9 @@
+/unfairplay-bot
+/data/
+/ipatool/
+/cache/
+/secrets/
+/canary/
+.env
+*.ipa
+*.bin

@@ -1,0 +1,19 @@
+services:
+  bot:
+    image: ghcr.io/missuo/unfairplay-bot:latest
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "127.0.0.1:8080:8080"
+    # ipatool derives the App Store device GUID from the MAC address. Keep it
+    # fixed so recreating the container does not look like a new device.
+    mac_address: "02:42:ac:11:00:42"
+    volumes:
+      - ./data:/data
+      - ./ipatool:/home/bot/.ipatool
+      - ./cache:/home/bot/.cache
+      - ./secrets/models:/secrets/models:ro
+      - ./canary:/canary:ro
+    # Lets running and queued tasks finish on update (see UNFAIRPLAY_BOT_DRAIN_TIMEOUT).
+    stop_grace_period: 35m

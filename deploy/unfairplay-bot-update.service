@@ -1,0 +1,10 @@
+[Unit]
+Description=Update unfairplay-bot to the newest verified image
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Set to the directory holding compose.yaml and .env.
+WorkingDirectory=/opt/unfairplay-bot
+ExecStart=/opt/unfairplay-bot/deploy/update.sh

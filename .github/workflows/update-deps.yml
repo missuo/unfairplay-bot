@@ -1,0 +1,51 @@
+name: update-deps
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency: update-deps
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.update.outputs.changed }}
+      commit: ${{ steps.commit.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - id: update
+        run: scripts/update-deps.sh
+      - if: steps.update.outputs.changed == 'true'
+        name: Test against the new versions
+        run: |
+          go vet ./...
+          go test -race ./...
+          . ./deps.env
+          GOBIN="$RUNNER_TEMP/bin" go install "github.com/DrWhax/unfairplay/cmd/unfairplay@$UNFAIRPLAY_VERSION"
+          GOBIN="$RUNNER_TEMP/bin" go install "github.com/majd/ipatool/v2@$(go list -m -f '{{.Version}}' github.com/majd/ipatool/v2)"
+      - if: steps.update.outputs.changed == 'true'
+        id: commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "chore(deps): ${{ steps.update.outputs.summary }}"
+          git push
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  # Pushes made with GITHUB_TOKEN do not trigger other workflows, so build here.
+  image:
+    needs: update
+    if: needs.update.outputs.changed == 'true'
+    uses: ./.github/workflows/image.yml
+    with:
+      ref: ${{ needs.update.outputs.commit }}
+    secrets: inherit
