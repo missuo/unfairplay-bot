@@ -174,3 +174,10 @@ go vet ./... && go test -race ./...
 
 The Linux build needs cgo (ipatool's keyring dependency), so build on Linux or
 with the Dockerfile rather than cross-compiling from macOS.
+
+## License
+
+Apache License 2.0; see [LICENSE](LICENSE). The Docker image also contains
+[ipatool](https://github.com/majd/ipatool) and
+[UnfairPlay](https://github.com/DrWhax/unfairplay), which remain under their
+own licenses.
