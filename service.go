@@ -7,7 +7,7 @@ import (
 )
 
 type Resolver interface {
-	Resolve(ctx context.Context, bundleID string, appID int64) (AppInfo, error)
+	Resolve(ctx context.Context, bundleID string, appID int64, purchase bool) (AppInfo, error)
 }
 
 // Service is the request flow shared by the HTTP API and the Telegram bot.
@@ -42,10 +42,12 @@ type Outcome struct {
 	Task     *TaskView     `json:"task,omitempty"`
 }
 
-func (s *Service) Resolve(ctx context.Context, bundleID string, appID int64) (AppInfo, error) {
+// Resolve looks the app up. purchase allows acquiring a license for a free
+// app the account does not own yet; previews pass false.
+func (s *Service) Resolve(ctx context.Context, bundleID string, appID int64, purchase bool) (AppInfo, error) {
 	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
-	info, err := s.resolver.Resolve(ctx, bundleID, appID)
+	info, err := s.resolver.Resolve(ctx, bundleID, appID, purchase)
 	if err != nil {
 		s.StoreFailed(classify(err))
 	}

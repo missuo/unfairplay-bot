@@ -25,6 +25,10 @@ type AppInfo struct {
 	PriceText   string    `json:"price_text,omitempty"`
 	IconURL     string    `json:"icon_url,omitempty"`
 	MinOS       string    `json:"min_os,omitempty"`
+	// NeedsLicense: the Apple ID does not own the app yet and Resolve was
+	// told not to acquire a license, so the build (ExternalVersionID, Key) is
+	// unknown and the version comes from the public lookup.
+	NeedsLicense bool `json:"needs_license,omitempty"`
 }
 
 type itunesApp struct {
@@ -38,6 +42,8 @@ type itunesApp struct {
 	FormattedPrice string  `json:"formattedPrice"`
 	Artwork        string  `json:"artworkUrl512"`
 	MinimumOS      string  `json:"minimumOsVersion"`
+	Version        string  `json:"version"`
+	ReleaseDate    string  `json:"currentVersionReleaseDate"`
 }
 
 func (s *Store) itunesLookup(ctx context.Context, bundleID string, appID int64) (*itunesApp, error) {
@@ -73,9 +79,13 @@ func (s *Store) itunesLookup(ctx context.Context, bundleID string, appID int64) 
 
 // Resolve finds the app and the build the App Store would serve right now.
 // The build comes from the same download endpoint ipatool downloads from, not
-// from the iTunes lookup API, whose CDN can lag behind a release.
-func (s *Store) Resolve(ctx context.Context, bundleID string, appID int64) (AppInfo, error) {
+// from the iTunes lookup API, whose CDN can lag behind a release. That
+// endpoint needs a license; with purchase false a free app the account does
+// not own yet is returned with NeedsLicense instead of being acquired.
+func (s *Store) Resolve(ctx context.Context, bundleID string, appID int64, purchase bool) (AppInfo, error) {
 	info := AppInfo{Target: Target{AppID: appID, BundleID: bundleID}}
+	var lookupVersion string
+	var lookupDate time.Time
 	// Descriptive data only; a failure here must not block the download.
 	if it, err := s.itunesLookup(ctx, bundleID, appID); err == nil && it != nil {
 		if appID != 0 && it.TrackID != appID {
@@ -88,10 +98,12 @@ func (s *Store) Resolve(ctx context.Context, bundleID string, appID int64) (AppI
 		}
 		info.Size, _ = strconv.ParseInt(it.FileSizeBytes, 10, 64)
 		info.Price, info.PriceText, info.IconURL, info.MinOS = it.Price, it.FormattedPrice, it.Artwork, it.MinimumOS
+		lookupVersion = it.Version
+		lookupDate, _ = time.Parse(time.RFC3339, it.ReleaseDate)
 	}
 
 	app := appstore.App{ID: info.AppID, BundleID: info.BundleID, Name: info.Name}
-	err := s.call(&app, func(acc appstore.Account) error {
+	err := s.call(&app, purchase, func(acc appstore.Account) error {
 		if app.ID == 0 {
 			// Not in the configured lookup country: ask the account's storefront.
 			out, err := s.as.Lookup(appstore.LookupInput{Account: acc, BundleID: bundleID, Platform: platform})
@@ -117,6 +129,12 @@ func (s *Store) Resolve(ctx context.Context, bundleID string, appID int64) (AppI
 		}
 		return nil
 	})
+	if !purchase && errors.Is(err, appstore.ErrLicenseRequired) && app.ID != 0 {
+		info.AppID, info.BundleID, info.NeedsLicense = app.ID, app.BundleID, true
+		info.Name = firstNonEmpty(info.Name, app.Name)
+		info.Version, info.ReleaseDate = lookupVersion, lookupDate
+		return info, nil
+	}
 	if err != nil {
 		return AppInfo{}, err
 	}

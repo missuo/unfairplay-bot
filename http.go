@@ -96,7 +96,8 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 
 	// Always ask the App Store for the current build: a cached artifact only
 	// counts as a hit if it is that exact build.
-	info, err := s.Resolve(r.Context(), req.BundleID, req.AppID)
+	// Creating a task is the confirmation, so a free app may be acquired.
+	info, err := s.Resolve(r.Context(), req.BundleID, req.AppID, true)
 	if err != nil {
 		writeError(w, statusFor(classify(err)), classify(err))
 		return

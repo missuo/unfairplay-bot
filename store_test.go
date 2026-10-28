@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -16,6 +17,19 @@ type fakeAppStore struct {
 	signedIn bool
 	loginErr error
 	logins   int
+
+	purchaseErrs []error // returned in order, then nil
+	purchases    int
+}
+
+func (f *fakeAppStore) Purchase(appstore.PurchaseInput) error {
+	f.purchases++
+	if len(f.purchaseErrs) > 0 {
+		err := f.purchaseErrs[0]
+		f.purchaseErrs = f.purchaseErrs[1:]
+		return err
+	}
+	return nil
 }
 
 func (f *fakeAppStore) AccountInfo() (appstore.AccountInfoOutput, error) {
@@ -119,5 +133,46 @@ func TestCheckModeNeverLogsIn(t *testing.T) {
 	s := &Store{as: fake, guard: guard, now: func() time.Time { return now }}
 	if _, err := s.relogin(fake.account); err == nil || fake.logins != 0 {
 		t.Fatalf("check-mode store logged in (logins %d, err %v)", fake.logins, err)
+	}
+}
+
+// Regression: an expired token reported by Purchase (while acquiring a
+// license for a not-yet-owned app) must trigger a re-login, like ipatool's
+// own `download --purchase`, instead of failing the request.
+func TestStoreReloginsWhenPurchaseReportsExpiredToken(t *testing.T) {
+	now := time.Now()
+	fake := &fakeAppStore{
+		signedIn: true, account: appstore.Account{Email: "me@example.com", Password: "pw", PasswordToken: "old"},
+		purchaseErrs: []error{fmt.Errorf("failed to purchase item with param 'STDQ': %w", appstore.ErrPasswordTokenExpired)},
+	}
+	s := newGuardedStore(t, "", fake, &now)
+	s.purchase = true
+	owned := false
+	calls := 0
+	err := s.call(&appstore.App{ID: 1}, true, func(acc appstore.Account) error {
+		calls++
+		if !owned && fake.purchases > 0 && len(fake.purchaseErrs) == 0 && acc.PasswordToken == "token" {
+			owned = true
+		}
+		if !owned {
+			return appstore.ErrLicenseRequired
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	if fake.logins != 1 || fake.purchases != 2 {
+		t.Fatalf("logins %d purchases %d, want 1 and 2", fake.logins, fake.purchases)
+	}
+}
+
+func TestStoreCallGivesUpAfterOneRelogin(t *testing.T) {
+	now := time.Now()
+	fake := &fakeAppStore{signedIn: true, account: appstore.Account{Email: "me@example.com", Password: "pw", PasswordToken: "old"}}
+	s := newGuardedStore(t, "", fake, &now)
+	err := s.call(&appstore.App{ID: 1}, true, func(appstore.Account) error { return appstore.ErrPasswordTokenExpired })
+	if !errors.Is(err, appstore.ErrPasswordTokenExpired) || fake.logins != 1 {
+		t.Fatalf("err %v logins %d; want the expired error after exactly one re-login", err, fake.logins)
 	}
 }

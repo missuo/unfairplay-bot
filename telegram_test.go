@@ -435,3 +435,47 @@ func TestHealthNotifiesOnlyOnChange(t *testing.T) {
 	}
 	fm.waitFor(t, adminID, "App Store connection restored")
 }
+
+func TestBotPreviewNeverAcquiresLicense(t *testing.T) {
+	b, fm, p := newTestBot(t)
+	res := b.svc.resolver.(*fakeResolver)
+	res.unowned = true
+	ctx := context.Background()
+
+	b.Handle(ctx, message(adminID, "12345"))
+	preview := fm.waitFor(t, adminID, "doesn't have it yet")
+	if len(res.purchases) != 1 || res.purchases[0] {
+		t.Fatalf("preview resolved with purchase flags %v, want [false]", res.purchases)
+	}
+
+	// Canceling leaves the account untouched.
+	b.Handle(ctx, click(adminID, preview, buttonData(preview, callbackNo)))
+	if len(res.purchases) != 1 {
+		t.Fatalf("cancel resolved again: %v", res.purchases)
+	}
+
+	// Confirming acquires the license, then downloads the exact build.
+	b.Handle(ctx, message(adminID, "12345"))
+	var again *sentMessage
+	for again == nil {
+		<-fm.changed
+		fm.mu.Lock()
+		if m := fm.msgs[fm.nextID]; m.chat == adminID && strings.Contains(m.text, "doesn't have it yet") && m.id != preview.id {
+			c := *m
+			again = &c
+		}
+		fm.mu.Unlock()
+	}
+	go b.Handle(ctx, click(adminID, again, buttonData(again, callbackOK)))
+	if key := <-p.started; key != "12345:80" {
+		t.Fatalf("downloaded %s", key)
+	}
+	res.mu.Lock()
+	flags := append([]bool(nil), res.purchases...)
+	res.mu.Unlock()
+	if len(flags) != 3 || flags[1] || !flags[2] {
+		t.Fatalf("purchase flags %v, want [false false true]", flags)
+	}
+	close(p.gate("12345:80"))
+	fm.waitFor(t, adminID, "is ready")
+}

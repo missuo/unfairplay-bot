@@ -212,27 +212,38 @@ func (s *Store) FinishLogin(code string) (string, error) {
 
 // call runs fn with the current account, refreshing an expired token and
 // acquiring a license once when allowed, like `ipatool download --purchase`.
-func (s *Store) call(app *appstore.App, fn func(appstore.Account) error) error {
+// With purchase, a missing license for a free app is acquired once (if the
+// service allows it); without, ErrLicenseRequired is returned to the caller.
+func (s *Store) call(app *appstore.App, purchase bool, fn func(appstore.Account) error) error {
 	acc, err := s.account()
 	if err != nil {
 		return err
 	}
-	purchased := false
-	for attempt := 0; ; attempt++ {
-		err = fn(acc)
+	// Each step happens at most once per call, so this always terminates:
+	// one re-login when the token expired (from fn or from Purchase), and
+	// one license acquisition when fn needs one.
+	relogged, triedPurchase, purchasePending := false, false, false
+	for {
+		err = nil
+		if purchasePending {
+			err = s.as.Purchase(appstore.PurchaseInput{Account: acc, App: *app, Platform: platform})
+			if err == nil || errors.Is(err, appstore.ErrLicenseAlreadyExists) {
+				purchasePending, err = false, nil
+			}
+		}
+		if err == nil {
+			err = fn(acc)
+		}
 		switch {
-		case err == nil || attempt == 2:
-			return err
-		case errors.Is(err, appstore.ErrPasswordTokenExpired):
+		case err == nil:
+			return nil
+		case errors.Is(err, appstore.ErrPasswordTokenExpired) && !relogged:
+			relogged = true
 			if acc, err = s.relogin(acc); err != nil {
 				return err
 			}
-		case errors.Is(err, appstore.ErrLicenseRequired) && s.purchase && !purchased && app.ID != 0:
-			err = s.as.Purchase(appstore.PurchaseInput{Account: acc, App: *app, Platform: platform})
-			if err != nil && !errors.Is(err, appstore.ErrLicenseAlreadyExists) {
-				return err
-			}
-			purchased = true
+		case errors.Is(err, appstore.ErrLicenseRequired) && purchase && s.purchase && !triedPurchase && app.ID != 0:
+			triedPurchase, purchasePending = true, true
 		default:
 			return err
 		}
@@ -254,7 +265,7 @@ func (s *Store) Download(ctx context.Context, t Target, dir string, report func(
 
 	app := appstore.App{ID: t.AppID, BundleID: t.BundleID, Name: t.Name}
 	var out appstore.DownloadOutput
-	err := s.call(&app, func(acc appstore.Account) (err error) {
+	err := s.call(&app, true, func(acc appstore.Account) (err error) {
 		out, err = s.as.Download(appstore.DownloadInput{
 			Context: ctx, Account: acc, App: app, Platform: platform,
 			OutputPath:        filepath.Join(dir, "encrypted.ipa"),
@@ -347,7 +358,7 @@ func classify(err error) *TaskError {
 // (download-product, via ListVersions) for a known app, without downloading.
 func (s *Store) Check(ctx context.Context, appID int64) error {
 	app := appstore.App{ID: appID}
-	return s.call(&app, func(acc appstore.Account) error {
+	return s.call(&app, true, func(acc appstore.Account) error {
 		_, err := s.as.ListVersions(appstore.ListVersionsInput{Context: ctx, Account: acc, App: app, Platform: platform})
 		return err
 	})

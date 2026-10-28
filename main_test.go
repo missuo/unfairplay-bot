@@ -327,9 +327,23 @@ func TestSigner(t *testing.T) {
 	}
 }
 
-type fakeResolver struct{ ext string }
+// fakeResolver serves build ext. With unowned set, the account lacks the
+// app until a Resolve with purchase acquires it.
+type fakeResolver struct {
+	mu        sync.Mutex
+	ext       string
+	unowned   bool
+	purchases []bool // the purchase flag of every call
+}
 
-func (f *fakeResolver) Resolve(_ context.Context, _ string, appID int64) (AppInfo, error) {
+func (f *fakeResolver) Resolve(_ context.Context, _ string, appID int64, purchase bool) (AppInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.purchases = append(f.purchases, purchase)
+	if f.unowned && !purchase {
+		return AppInfo{Target: Target{AppID: appID, Name: "Example", Version: "8.0.lookup"}, NeedsLicense: true}, nil
+	}
+	f.unowned = false
 	t := target(appID, f.ext)
 	t.Name, t.Version = "Example", "8.0."+f.ext
 	return AppInfo{Target: t}, nil

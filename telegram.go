@@ -293,7 +293,8 @@ func (b *Bot) sendUsers(ctx context.Context, chatID int64) {
 // preview resolves the app and asks the user to confirm the exact build.
 func (b *Bot) preview(ctx context.Context, chatID int64, user tgUser, bundleID string, appID int64) {
 	msgID := b.send(ctx, chatID, "🔍 Looking up the App Store…", nil)
-	info, err := b.svc.Resolve(ctx, bundleID, appID)
+	// Looking at an app must not add it to the Apple ID; that waits for ✅.
+	info, err := b.svc.Resolve(ctx, bundleID, appID, false)
 	if err != nil {
 		te := classify(err)
 		b.edit(ctx, chatID, msgID, "❌ Lookup failed: "+friendlyError(te), nil)
@@ -386,6 +387,17 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgCallback) {
 // start submits a confirmed build and follows it until it finishes.
 func (b *Bot) start(ctx context.Context, p *pendingRequest, msgID int) {
 	info, user := p.info, p.user
+	if info.NeedsLicense {
+		// Confirmed: acquire the free license, then resolve the exact build.
+		b.edit(ctx, p.chatID, msgID, renderPreview(info, false)+"\n\n🔐 Adding the app to the Apple ID…", nil)
+		resolved, err := b.svc.Resolve(ctx, info.BundleID, info.AppID, true)
+		if err != nil {
+			b.edit(ctx, p.chatID, msgID, renderPreview(info, false)+"\n\n❌ "+friendlyError(classify(err)), nil)
+			return
+		}
+		resolved.Developer = firstNonEmpty(resolved.Developer, info.Developer)
+		info = resolved
+	}
 	out, err := b.svc.Request(info.Target)
 	if err != nil {
 		code := "internal"
@@ -673,9 +685,14 @@ func renderPreview(info AppInfo, cached bool) string {
 	if len(extra) > 0 {
 		sb.WriteString(strings.Join(extra, " · ") + "\n")
 	}
-	if cached {
+	switch {
+	case cached:
 		sb.WriteString("\n⚡ This version is cached. Confirm to get the link right away.")
-	} else {
+	case info.NeedsLicense && info.Price > 0:
+		sb.WriteString("\n💲 This Apple ID doesn't own this paid app, so it can't be downloaded until it's bought.")
+	case info.NeedsLicense:
+		sb.WriteString("\nIs this the right app? This Apple ID doesn't have it yet: confirming adds it (free) to the account, then downloads and decrypts it.")
+	default:
 		sb.WriteString("\nIs this the right app? Confirm to download and decrypt the current version.")
 	}
 	return sb.String()
