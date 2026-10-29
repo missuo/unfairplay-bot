@@ -318,23 +318,15 @@ func (m *Manager) process(ctx context.Context, t *task) (Artifact, error) {
 	_ = os.Remove(encrypted)
 
 	m.update(t, StageFinalizing, nil)
-	// Strip the account's licenses and identity before anything is cached.
-	// A recent unfairplay already did it while packaging; then only check.
-	clean := decrypted
-	if verifySanitized(decrypted) != nil {
-		clean = filepath.Join(dir, "clean.ipa")
-		res, err := sanitizeIPA(decrypted, clean)
-		if err != nil {
-			return Artifact{}, err
-		}
-		_ = os.Remove(decrypted)
-		slog.Info("removed account data", "id", t.view.ID, "license_files", res.RemovedLicenseFiles, "metadata_fields", res.RemovedMetadataKeys)
+	// Nothing carrying the account's licenses or identity enters the cache.
+	if err := verifySanitized(decrypted); err != nil {
+		return Artifact{}, err
 	}
-	a, err := describeIPA(clean, target)
+	a, err := describeIPA(decrypted, target)
 	if err != nil {
 		return Artifact{}, err
 	}
-	return m.cache.Add(a, clean)
+	return m.cache.Add(a, decrypted)
 }
 
 // Drain stops accepting tasks and waits for queued and running ones.

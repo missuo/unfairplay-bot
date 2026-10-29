@@ -22,9 +22,6 @@ import (
 type Decrypter struct {
 	Bin   string
 	Model string
-	// StripAccountData: this unfairplay supports --strip-account-data, so it
-	// removes SC_Info and Apple ID metadata itself and no repack is needed.
-	StripAccountData bool
 }
 
 // supportsStripAccountData asks the installed unfairplay whether decrypt has
@@ -36,11 +33,9 @@ func supportsStripAccountData(bin string) bool {
 
 func (d Decrypter) Decrypt(ctx context.Context, input, output string) error {
 	report := filepath.Join(filepath.Dir(output), "unfairplay-report.json")
-	args := []string{"decrypt", "--input", input, "--output", output, "--report", report, "--model", d.Model}
-	if d.StripAccountData {
-		args = append(args, "--strip-account-data")
-	}
-	cmd := exec.CommandContext(ctx, d.Bin, args...)
+	// unfairplay leaves out SC_Info and the Apple ID metadata while packaging.
+	cmd := exec.CommandContext(ctx, d.Bin, "decrypt", "--input", input, "--output", output,
+		"--report", report, "--model", d.Model, "--strip-account-data")
 	var stderr tailBuffer
 	cmd.Stdout = io.Discard
 	cmd.Stderr = &stderr

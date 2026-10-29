@@ -29,6 +29,11 @@ links to them are private.
   `bundle_id` and by `app_id` for the same app share the cache.
 - **Deduplication.** Submitting a build that is already queued or running
   returns the existing task.
+- **No account data in the output.** Decryption runs
+  `unfairplay decrypt --strip-account-data`, which leaves out every `SC_Info`
+  license and the Apple ID and purchaser fields of `iTunesMetadata.plist`.
+  Each IPA is checked again before it is cached; a leftover fails the task.
+  The service refuses to start with an UnfairPlay that lacks the flag.
 - **Expiry.** An artifact lives 24 h (`UNFAIRPLAY_BOT_CACHE_TTL`) after its
   most recent hit. Hits are API cache hits and full downloads. A signed link
   stays valid until the artifact's expiry at the time the link was issued;

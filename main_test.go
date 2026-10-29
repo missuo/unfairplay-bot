@@ -27,6 +27,8 @@ type fakePipeline struct {
 	started  chan string
 	release  map[string]chan struct{}
 	failWith map[string]error
+
+	keepAccountData bool
 }
 
 func newFakePipeline() *fakePipeline {
@@ -62,8 +64,14 @@ func (f *fakePipeline) Download(ctx context.Context, t Target, dir string, repor
 	return path, writeIPA(path, t)
 }
 
+// Decrypt behaves like `unfairplay decrypt --strip-account-data`, unless
+// keepAccountData simulates an unfairplay that leaves account data in.
 func (f *fakePipeline) Decrypt(_ context.Context, input, output string) error {
-	return os.Rename(input, output)
+	if f.keepAccountData {
+		return os.Rename(input, output)
+	}
+	_, err := fakeStripAccountData(input, output)
+	return err
 }
 
 func writeIPA(path string, t Target) error {
@@ -481,5 +489,22 @@ func TestWatchProgressReadsBarState(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("no progress reported")
+	}
+}
+
+// An unfairplay that leaves licenses or the Apple ID in its output fails
+// the task; nothing is cached.
+func TestManagerRejectsOutputWithAccountData(t *testing.T) {
+	p := newFakePipeline()
+	p.keepAccountData = true
+	m, cache := newTestManager(t, p, 1, 10)
+	v, _, _ := m.Submit(target(1, "1"))
+	close(p.gate("1:1"))
+	v = waitFor(t, m, v.ID, StageFailed)
+	if v.Error == nil || v.Error.Code != "sanitize_failed" {
+		t.Fatalf("error %+v", v.Error)
+	}
+	if cache.Stats().Artifacts != 0 {
+		t.Fatal("an IPA with account data was cached")
 	}
 }
