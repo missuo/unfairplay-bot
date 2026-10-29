@@ -63,7 +63,9 @@ func run() error {
 		Concurrency: cfg.Concurrency, DecryptConcurrency: cfg.DecryptConcurrency, MaxQueue: cfg.MaxQueue,
 		Timeout: cfg.TaskTimeout, Retention: cfg.TaskRetention, WorkDir: filepath.Join(cfg.DataDir, "work"),
 		OnFailure: svc.StoreFailed,
-	}, pipeline{Store: store, Decrypter: Decrypter{Bin: cfg.UnfairplayBin, Model: cfg.ModelPath}}, cache)
+	}, pipeline{Store: store, Decrypter: Decrypter{
+		Bin: cfg.UnfairplayBin, Model: cfg.ModelPath, StripAccountData: supportsStripAccountData(cfg.UnfairplayBin),
+	}}, cache)
 	if err != nil {
 		return err
 	}
@@ -110,7 +112,7 @@ func run() error {
 
 	errc := make(chan error, 1)
 	go func() {
-		slog.Info("listening", "addr", cfg.Listen, "versions", srv.versions)
+		slog.Info("listening", "addr", cfg.Listen, "versions", srv.versions, "unfairplay_strips_account_data", supportsStripAccountData(cfg.UnfairplayBin))
 		errc <- httpServer.ListenAndServe()
 	}()
 	select {

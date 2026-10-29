@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -75,10 +76,27 @@ func writeIPA(path string, t Target) error {
 	w, _ := zw.Create("iTunesMetadata.plist")
 	fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0"><dict>
+<key>apple-id</key><string>me@example.com</string>
+<key>userName</key><string>me@example.com</string>
+<key>itemName</key><string>Example</string>
 <key>bundleShortVersionString</key><string>8.0.%s</string>
 <key>softwareVersionExternalIdentifier</key><integer>%s</integer>
 <key>softwareVersionBundleId</key><string>com.example.app</string>
+<key>com.apple.iTunesStore.downloadInfo</key><dict>
+  <key>accountInfo</key><dict><key>AppleID</key><string>me@example.com</string><key>DSPersonID</key><integer>123</integer><key>FirstName</key><string>Me</string></dict>
+  <key>purchaseDate</key><string>2026-10-01T00:00:00Z</string>
+</dict>
 </dict></plist>`, t.ExternalVersionID, t.ExternalVersionID)
+	for _, name := range []string{
+		"Payload/Example.app/Example",
+		"Payload/Example.app/SC_Info/Example.sinf",
+		"Payload/Example.app/SC_Info/Example.supf",
+		"Payload/Example.app/PlugIns/Widget.appex/SC_Info/Widget.sinf",
+		"Payload/Example.app/Watch/W.app/sc_info/W.sinf",
+	} {
+		w, _ := zw.Create(name)
+		w.Write([]byte(name))
+	}
 	return zw.Close()
 }
 
@@ -400,7 +418,26 @@ func TestHTTPFlowCacheHitOnlyForCurrentBuild(t *testing.T) {
 	if err != nil || dl.StatusCode != http.StatusOK {
 		t.Fatalf("download: %v %d", err, dl.StatusCode)
 	}
+	served, _ := io.ReadAll(dl.Body)
 	dl.Body.Close()
+	// What users download carries no licenses and no Apple ID.
+	zr, err := zip.NewReader(bytes.NewReader(served), int64(len(served)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range zr.File {
+		if isLicensePath(f.Name) {
+			t.Fatalf("served IPA contains %s", f.Name)
+		}
+		if f.Name == "iTunesMetadata.plist" {
+			rc, _ := f.Open()
+			meta, _ := io.ReadAll(rc)
+			rc.Close()
+			if bytes.Contains(meta, []byte("me@example.com")) {
+				t.Fatal("served IPA contains the Apple ID")
+			}
+		}
+	}
 	if bad, _ := http.Get(strings.Replace(link, "sig=", "sig=x", 1)); bad.StatusCode != http.StatusForbidden {
 		t.Fatalf("tampered link status %d", bad.StatusCode)
 	}
