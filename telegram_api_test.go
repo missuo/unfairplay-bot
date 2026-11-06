@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -46,5 +47,20 @@ func TestTGClientReplyMarkupOnlyWhenButtons(t *testing.T) {
 	m := bodies[2]["reply_markup"].(map[string]any)
 	if kb := m["inline_keyboard"].([]any); len(kb) != 0 {
 		t.Fatalf("edit keyboard = %v", kb)
+	}
+}
+
+// Network errors must not leak the bot token, which is part of the URL.
+func TestTGClientErrorsOmitToken(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	base := srv.URL
+	srv.Close() // connection refused
+	c := newTGClient(base, "123456:SECRET-TOKEN")
+	_, err := c.Send(context.Background(), 1, "x", nil)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if strings.Contains(err.Error(), "SECRET-TOKEN") {
+		t.Fatalf("error leaks the token: %v", err)
 	}
 }

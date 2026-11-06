@@ -1,9 +1,13 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -174,5 +178,44 @@ func TestStoreCallGivesUpAfterOneRelogin(t *testing.T) {
 	err := s.call(&appstore.App{ID: 1}, true, func(appstore.Account) error { return appstore.ErrPasswordTokenExpired })
 	if !errors.Is(err, appstore.ErrPasswordTokenExpired) || fake.logins != 1 {
 		t.Fatalf("err %v logins %d; want the expired error after exactly one re-login", err, fake.logins)
+	}
+}
+
+type resolveStore struct {
+	*fakeAppStore
+	t *testing.T
+}
+
+func (r resolveStore) ListVersions(appstore.ListVersionsInput) (appstore.ListVersionsOutput, error) {
+	return appstore.ListVersionsOutput{LatestExternalVersionID: "900"}, nil
+}
+
+// GetVersionMetadata reads the remote IPA through emulated Store requests and
+// can hang a preview for hours on a large app.
+func (r resolveStore) GetVersionMetadata(appstore.GetVersionMetadataInput) (appstore.GetVersionMetadataOutput, error) {
+	r.t.Fatal("Resolve called GetVersionMetadata")
+	return appstore.GetVersionMetadataOutput{}, nil
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestResolveUsesListingVersionNotIPAMetadata(t *testing.T) {
+	now := time.Now()
+	fake := &fakeAppStore{signedIn: true, account: appstore.Account{Email: "me@example.com", Password: "pw", PasswordToken: "token"}}
+	s := newGuardedStore(t, "", fake, &now)
+	s.as = resolveStore{fakeAppStore: fake, t: t}
+	s.country = "us"
+	s.http = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body := `{"results":[{"trackId":42,"bundleId":"com.example.big","trackName":"Big","version":"3.2.1","currentVersionReleaseDate":"2026-11-01T08:00:00Z"}]}`
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: http.Header{}}, nil
+	})}
+	info, err := s.Resolve(context.Background(), "", 42, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Key != "42:900" || info.Version != "3.2.1" || info.ReleaseDate.Year() != 2026 || info.Name != "Big" {
+		t.Fatalf("info %+v", info)
 	}
 }

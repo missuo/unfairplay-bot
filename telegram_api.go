@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -94,6 +96,11 @@ func (c *tgClient) call(ctx context.Context, method string, params, out any) err
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := c.http.Do(req)
 		if err != nil {
+			// *url.Error repeats the request URL, which contains the bot token.
+			var uerr *url.Error
+			if errors.As(err, &uerr) {
+				err = uerr.Err
+			}
 			return fmt.Errorf("telegram %s: %w", method, err)
 		}
 		var envelope struct {

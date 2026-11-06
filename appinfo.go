@@ -118,21 +118,18 @@ func (s *Store) Resolve(ctx context.Context, bundleID string, appID int64, purch
 			return err
 		}
 		info.ExternalVersionID = out.LatestExternalVersionID
-		meta, err := s.as.GetVersionMetadata(appstore.GetVersionMetadataInput{
-			Context: ctx, Account: acc, App: app, VersionID: out.LatestExternalVersionID, Platform: platform,
-		})
-		if errors.Is(err, appstore.ErrPasswordTokenExpired) {
-			return err
-		}
-		if err == nil {
-			info.Version, info.ReleaseDate = meta.DisplayVersion, meta.ReleaseDate
-		}
 		return nil
 	})
+	// The display version comes from the listing, not GetVersionMetadata:
+	// that reads the remote IPA's zip directory through emulated Store
+	// requests, one per 4 KB, which can take hours for a large app and cannot
+	// be canceled. The build itself is ExternalVersionID; the artifact gets
+	// the real version from the downloaded IPA.
+	info.Version, info.ReleaseDate = firstNonEmpty(lookupVersion, app.Version), lookupDate
 	if !purchase && errors.Is(err, appstore.ErrLicenseRequired) && app.ID != 0 {
 		info.AppID, info.BundleID, info.NeedsLicense = app.ID, app.BundleID, true
 		info.Name = firstNonEmpty(info.Name, app.Name)
-		info.Version, info.ReleaseDate = lookupVersion, lookupDate
+		info.Version, info.ReleaseDate = firstNonEmpty(lookupVersion, app.Version), lookupDate
 		return info, nil
 	}
 	if err != nil {
