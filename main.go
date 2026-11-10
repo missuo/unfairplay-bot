@@ -141,7 +141,9 @@ func run() error {
 // runCheck is the `check` subcommand used by deploy/update.sh to prove a new
 // image can still talk to the App Store with the existing session before it
 // replaces the running one. It never logs in by itself. Exit codes: 0 ok,
-// 1 failed, 2 not configured.
+// 1 failed, 2 not configured, 3 the session is valid but this build needs
+// a fresh sign-in (a newer ipatool keeps more session state), which the
+// service does by itself with configured credentials, or via /login.
 func runCheck() int {
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -164,6 +166,9 @@ func runCheck() int {
 	defer cancel()
 	if err := store.Check(ctx, cfg.HealthAppID); err != nil {
 		fmt.Fprintln(os.Stderr, "App Store check failed:", classify(err).Error())
+		if isUnprovisioned(err) {
+			return 3
+		}
 		return 1
 	}
 	fmt.Println("App Store check passed")

@@ -70,11 +70,11 @@ func (g *loginGuard) allow(now time.Time) error {
 	return nil
 }
 
-func (g *loginGuard) failed(now time.Time) {
+func (g *loginGuard) failed(now time.Time, err error) {
 	g.Failures++
 	g.LastFailure = now
 	g.save()
-	slog.Warn("automatic Apple ID login failed", "failures", g.Failures, "max", g.maxFailures)
+	slog.Warn("automatic Apple ID login failed", "failures", g.Failures, "max", g.maxFailures, "err", err)
 }
 
 func (g *loginGuard) succeeded() {

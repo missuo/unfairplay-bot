@@ -219,3 +219,25 @@ func TestResolveUsesListingVersionNotIPAMetadata(t *testing.T) {
 		t.Fatalf("info %+v", info)
 	}
 }
+
+// Regression: ipatool v2.8 signs every store request with Store AMD state
+// that only its own sign-in provisions. A session saved by an older ipatool
+// must lead to one re-login, not a permanent store_error.
+func TestStoreReloginsWhenStoreAMDStateIsMissing(t *testing.T) {
+	now := time.Now()
+	fake := &fakeAppStore{signedIn: true, account: appstore.Account{Email: "me@example.com", Password: "pw", PasswordToken: "old"}}
+	s := newGuardedStore(t, "", fake, &now)
+	unprovisioned := errors.New("failed to send http request: generate Store AMD proof: store AMD state is not provisioned")
+	err := s.call(&appstore.App{ID: 1}, true, func(appstore.Account) error {
+		if fake.logins == 0 {
+			return unprovisioned
+		}
+		return nil
+	})
+	if err != nil || fake.logins != 1 {
+		t.Fatalf("err %v logins %d; want success after one re-login", err, fake.logins)
+	}
+	if got := classify(unprovisioned).Code; got != "auth_required" {
+		t.Fatalf("classify = %q, want auth_required", got)
+	}
+}

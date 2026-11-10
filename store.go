@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -148,7 +149,7 @@ func (s *Store) loginLocked(code string, automatic bool) (appstore.Account, erro
 	out, err := s.as.Login(appstore.LoginInput{Email: creds.Email, Password: creds.Password, AuthCode: code})
 	if err != nil {
 		if automatic {
-			s.guard.failed(s.now())
+			s.guard.failed(s.now(), err)
 		}
 		if errors.Is(err, appstore.ErrAuthCodeRequired) {
 			return appstore.Account{}, err
@@ -237,7 +238,7 @@ func (s *Store) call(app *appstore.App, purchase bool, fn func(appstore.Account)
 		switch {
 		case err == nil:
 			return nil
-		case errors.Is(err, appstore.ErrPasswordTokenExpired) && !relogged:
+		case needsSignIn(err) && !relogged:
 			relogged = true
 			if acc, err = s.relogin(acc); err != nil {
 				return err
@@ -330,6 +331,19 @@ func watchProgress(bar *progressbar.ProgressBar, done <-chan struct{}, report fu
 	}
 }
 
+// needsSignIn reports whether err means the saved session cannot be used
+// until the account signs in again: an expired password token, or (since
+// ipatool v2.8) a session saved by an older ipatool without the Store AMD
+// state that every store request now has to be signed with. ipatool signs
+// in to provision that state, so a sign-in recovers from both.
+func needsSignIn(err error) bool {
+	return errors.Is(err, appstore.ErrPasswordTokenExpired) || isUnprovisioned(err)
+}
+
+func isUnprovisioned(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "store AMD state is not provisioned")
+}
+
 // classify maps errors to stable codes for API clients.
 func classify(err error) *TaskError {
 	var te *TaskError
@@ -342,6 +356,8 @@ func classify(err error) *TaskError {
 		return &TaskError{Code: "canceled", Message: "task was canceled"}
 	case errors.Is(err, appstore.ErrAuthCodeRequired):
 		return &TaskError{Code: "auth_required", Message: "Apple requires a 2FA code; run `ipatool auth login` on the server"}
+	case isUnprovisioned(err):
+		return &TaskError{Code: "auth_required", Message: "the saved App Store session predates this ipatool and needs a fresh sign-in"}
 	case errors.Is(err, appstore.ErrAppNotFound):
 		return &TaskError{Code: "not_found", Message: err.Error()}
 	case errors.Is(err, appstore.ErrLicenseRequired):

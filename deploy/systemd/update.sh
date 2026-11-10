@@ -68,6 +68,7 @@ main() {
 		case $code in
 		0) echo "App Store canary passed" ;;
 		2) echo "warning: UNFAIRPLAY_BOT_HEALTH_APP_ID not set, skipping App Store canary" >&2 ;;
+		3) echo "warning: the new ipatool needs a fresh App Store sign-in; the service signs in on first use (or send /login)" >&2 ;;
 		*)
 			if grep -q '"ok": false' <<<"$(status)"; then
 				echo "App Store canary failed, but the running release is unhealthy too" >&2
