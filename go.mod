@@ -5,7 +5,7 @@ go 1.26.5
 require (
 	github.com/byteness/keyring v1.9.0
 	github.com/juju/persistent-cookiejar v1.0.0
-	github.com/majd/ipatool/v2 v2.8.1-0.20261109170727-e0e2908dc866
+	github.com/majd/ipatool/v2 v2.8.1-0.20261110165225-8771e5744527
 	github.com/schollz/progressbar/v3 v3.19.1
 	howett.net/plist v1.0.1
 )
