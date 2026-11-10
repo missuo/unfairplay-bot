@@ -260,3 +260,19 @@ func TestCheckModeKeepsUnprovisionedCause(t *testing.T) {
 		t.Fatalf("classify = %v", classify(err))
 	}
 }
+
+// Paid apps are never bought: ErrLicenseRequired comes back without a
+// Purchase call (Apple answers one with "Verification is required").
+func TestStoreNeverBuysPaidApps(t *testing.T) {
+	now := time.Now()
+	fake := &fakeAppStore{signedIn: true, account: appstore.Account{Email: "me@example.com", Password: "pw", PasswordToken: "token"}}
+	s := newGuardedStore(t, "", fake, &now)
+	s.purchase = true
+	err := s.call(&appstore.App{ID: 364876095, Price: 14.99}, true, func(appstore.Account) error { return appstore.ErrLicenseRequired })
+	if !errors.Is(err, appstore.ErrLicenseRequired) || fake.purchases != 0 {
+		t.Fatalf("err %v purchases %d; want license_required and no purchase", err, fake.purchases)
+	}
+	if !(AppInfo{NeedsLicense: true, Price: 14.99}).Paid() || (AppInfo{NeedsLicense: true}).Paid() {
+		t.Fatal("Paid() misclassifies")
+	}
+}

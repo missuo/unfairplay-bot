@@ -321,6 +321,10 @@ func (b *Bot) preview(ctx context.Context, chatID int64, user tgUser, bundleID s
 		b.edit(ctx, chatID, msgID, "❌ Lookup failed: "+friendlyError(te), nil)
 		return
 	}
+	if info.Paid() {
+		b.edit(ctx, chatID, msgID, renderPreview(info, false), nil)
+		return
+	}
 	pid := shortID()
 	b.mu.Lock()
 	for id, p := range b.pending {
@@ -428,6 +432,10 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgCallback) {
 // start submits a confirmed build and follows it until it finishes.
 func (b *Bot) start(ctx context.Context, p *pendingRequest, msgID int) {
 	info, user := p.info, p.user
+	if info.Paid() {
+		b.edit(ctx, p.chatID, msgID, renderPreview(info, false), nil)
+		return
+	}
 	if info.NeedsLicense {
 		// Confirmed: acquire the free license, then resolve the exact build.
 		b.edit(ctx, p.chatID, msgID, renderPreview(info, false)+"\n\n🔐 Adding the app to the Apple ID…", nil)
@@ -818,8 +826,8 @@ func renderPreview(info AppInfo, cached bool) string {
 	switch {
 	case cached:
 		sb.WriteString("\n⚡ This version is cached. Confirm to get the link right away.")
-	case info.NeedsLicense && info.Price > 0:
-		sb.WriteString("\n💲 This Apple ID doesn't own this paid app, so it can't be downloaded until it's bought.")
+	case info.Paid():
+		sb.WriteString("\n🚫 This is a paid app the Apple ID doesn't own. Paid apps aren't supported.")
 	case info.NeedsLicense:
 		sb.WriteString("\nIs this the right app? This Apple ID doesn't have it yet: confirming adds it (free) to the account, then downloads and decrypts it.")
 	default:
@@ -940,7 +948,7 @@ func allowedLabel(u AllowedUser) string {
 
 var friendlyMessages = map[string]string{
 	"not_found":             "The App Store has no such app. Check the ID, and whether the app is available in the account's region.",
-	"license_required":      "The account doesn't own this app. Paid apps must be bought first.",
+	"license_required":      "The account doesn't own this app. Paid apps aren't supported.",
 	"subscription_required": "This app requires a subscription to download.",
 	"auth_required":         "The server's Apple ID session has expired. The admin has been notified.",
 	"decrypt_failed":        "Decryption failed.",

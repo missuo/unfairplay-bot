@@ -31,6 +31,10 @@ type AppInfo struct {
 	NeedsLicense bool `json:"needs_license,omitempty"`
 }
 
+// Paid reports an app the Apple ID would have to buy. The service never
+// buys apps, so these are refused.
+func (i AppInfo) Paid() bool { return i.NeedsLicense && i.Price > 0 }
+
 type itunesApp struct {
 	TrackID        int64   `json:"trackId"`
 	BundleID       string  `json:"bundleId"`
@@ -102,7 +106,7 @@ func (s *Store) Resolve(ctx context.Context, bundleID string, appID int64, purch
 		lookupDate, _ = time.Parse(time.RFC3339, it.ReleaseDate)
 	}
 
-	app := appstore.App{ID: info.AppID, BundleID: info.BundleID, Name: info.Name}
+	app := appstore.App{ID: info.AppID, BundleID: info.BundleID, Name: info.Name, Price: info.Price}
 	err := s.call(&app, purchase, func(acc appstore.Account) error {
 		if app.ID == 0 {
 			// Not in the configured lookup country: ask the account's storefront.

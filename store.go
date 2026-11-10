@@ -246,7 +246,8 @@ func (s *Store) call(app *appstore.App, purchase bool, fn func(appstore.Account)
 				// tells a missing Store AMD state apart this way).
 				return fmt.Errorf("%w (signing in because: %w)", err, stale)
 			}
-		case errors.Is(err, appstore.ErrLicenseRequired) && purchase && s.purchase && !triedPurchase && app.ID != 0:
+		case errors.Is(err, appstore.ErrLicenseRequired) && purchase && s.purchase && !triedPurchase && app.ID != 0 && app.Price == 0:
+			// Only free licenses are acquired; paid apps are never bought.
 			triedPurchase, purchasePending = true, true
 		default:
 			return err
@@ -364,7 +365,7 @@ func classify(err error) *TaskError {
 	case errors.Is(err, appstore.ErrAppNotFound):
 		return &TaskError{Code: "not_found", Message: err.Error()}
 	case errors.Is(err, appstore.ErrLicenseRequired):
-		return &TaskError{Code: "license_required", Message: "the account does not own this app (paid apps must be bought first)"}
+		return &TaskError{Code: "license_required", Message: "the account does not own this app (paid apps are not supported)"}
 	case errors.Is(err, appstore.ErrSubscriptionRequired):
 		return &TaskError{Code: "subscription_required", Message: err.Error()}
 	case errors.Is(err, appstore.ErrTemporarilyUnavailable):
