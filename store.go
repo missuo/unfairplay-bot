@@ -240,8 +240,11 @@ func (s *Store) call(app *appstore.App, purchase bool, fn func(appstore.Account)
 			return nil
 		case needsSignIn(err) && !relogged:
 			relogged = true
+			stale := err
 			if acc, err = s.relogin(acc); err != nil {
-				return err
+				// Keep why a sign-in was needed (the check subcommand
+				// tells a missing Store AMD state apart this way).
+				return fmt.Errorf("%w (signing in because: %w)", err, stale)
 			}
 		case errors.Is(err, appstore.ErrLicenseRequired) && purchase && s.purchase && !triedPurchase && app.ID != 0:
 			triedPurchase, purchasePending = true, true

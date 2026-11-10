@@ -241,3 +241,22 @@ func TestStoreReloginsWhenStoreAMDStateIsMissing(t *testing.T) {
 		t.Fatalf("classify = %q, want auth_required", got)
 	}
 }
+
+// The check subcommand never signs in; it must still be able to tell that
+// the store wanted a sign-in for a missing Store AMD state (exit code 3).
+func TestCheckModeKeepsUnprovisionedCause(t *testing.T) {
+	now := time.Now()
+	guard, _ := openLoginGuard("", 0)
+	fake := &fakeAppStore{account: appstore.Account{Email: "me@example.com", Password: "pw", PasswordToken: "old"}, signedIn: true}
+	s := &Store{as: fake, guard: guard, now: func() time.Time { return now }}
+	s.creds = Credentials{Email: "me@example.com", Password: "pw"}
+	err := s.call(&appstore.App{ID: 1}, true, func(appstore.Account) error {
+		return errors.New("generate Store AMD proof: store AMD state is not provisioned")
+	})
+	if !isUnprovisioned(err) || fake.logins != 0 {
+		t.Fatalf("err %v logins %d; want the unprovisioned cause kept and no login", err, fake.logins)
+	}
+	if classify(err).Code != "auth_required" {
+		t.Fatalf("classify = %v", classify(err))
+	}
+}
